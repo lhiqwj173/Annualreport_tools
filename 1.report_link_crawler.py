@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import csv
 import logging
-import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -233,9 +232,8 @@ class ReportCrawler:
     """定期报告爬虫主类。"""
 
     CSV_HEADERS = [
-        "company_code", "company_name", "org_id", "title", "report_year",
-        "announcement_date", "report_type", "is_correction",
-        "announcement_id", "url"
+        "company_code", "company_name", "title",
+        "announcement_date", "announcement_id", "url"
     ]
 
     def __init__(self, config: CrawlerConfig) -> None:
@@ -259,29 +257,7 @@ class ReportCrawler:
         dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=tz_shanghai)
         return dt.strftime("%Y-%m-%d")
 
-    # 修订类关键词（统一定义，避免多处维护）
-    CORRECTION_KEYWORDS = ["更正", "修订", "修正", "补充", "更新"]
 
-    def _identify_report_type(self, title: str) -> str:
-        if "摘要" in title:
-            return "摘要"
-        if any(kw in title for kw in self.CORRECTION_KEYWORDS):
-            return "修订"
-        return "正式"
-
-    def _validate_report_year(self, report_year: int, pub_date: str, title: str) -> None:
-        """校验报告期年份与公告日期的逻辑一致性。严格抛出异常。"""
-        pub_year = int(pub_date[:4])
-        
-        # 盈利预测报告允许预测下一年度，放宽1年
-        is_forecast = "预测" in title or "预告" in title
-        max_allowed_year = pub_year + 1 if is_forecast else pub_year
-        
-        if report_year > max_allowed_year:
-            raise ValueError(
-                f"报告期校验失败: 报告期年份({report_year})超出允许范围(最大{max_allowed_year})。"
-                f"公告日期: {pub_date}, 标题: {title}"
-            )
 
     def _parse_announcement(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """解析单条公告数据。返回None仅表示被排除关键词过滤，其他情况严格抛出异常。"""
@@ -298,7 +274,7 @@ class ReportCrawler:
             logging.debug(f"关键词过滤: {title}")
             return None
 
-        # 提取公告日期 - 避免前视偏差的核心字段
+        # 提取公告日期
         announcement_time = item["announcementTime"]
         if not isinstance(announcement_time, (int, float)):
             raise RuntimeError(
@@ -306,44 +282,16 @@ class ReportCrawler:
             )
         announcement_date = self._parse_announcement_time(int(announcement_time))
 
-        # 提取报告期年份（API的category已做主要筛选，这里仅提取年份）
-        # 优先匹配跨年格式如"2007-2008年度"，提取起始年份
-        cross_year_match = re.search(r"(\d{4})[-—](\d{4})年", title)
-        if cross_year_match:
-            report_year: Optional[int] = int(cross_year_match.group(1))
-        else:
-            year_match = re.search(r"(\d{4})年", title)
-            report_year = int(year_match.group(1)) if year_match else None
-        
-        if report_year is not None:
-            # 报告期逻辑校验
-            self._validate_report_year(report_year, announcement_date, title)
-        else:
-            # 标题中无年份信息，标记为未知，后续从PDF正文提取
-            report_year = None
-            logging.warning(f"标题中无年份信息，report_year标记为未知: {title}")
-
-        # 严格校验关键ID字段
-        org_id = item.get("orgId")
-        if org_id is None:
-            raise RuntimeError(f"缺少orgId字段，无法唯一标识公司: {title}")
-        
+        # 严格校验公告ID字段
         announcement_id = item.get("announcementId")
         if announcement_id is None:
             raise RuntimeError(f"缺少announcementId字段，无法唯一标识公告: {title}")
 
-        # 识别是否为更正/修订版本（使用统一的关键词列表）
-        is_correction = 1 if any(w in title for w in self.CORRECTION_KEYWORDS) else 0
-
         return {
             "company_code": item["secCode"],
             "company_name": item["secName"],
-            "org_id": str(org_id),
             "title": title,
-            "report_year": str(report_year) if report_year is not None else "未知",
             "announcement_date": announcement_date,
-            "report_type": self._identify_report_type(title),
-            "is_correction": is_correction,
             "announcement_id": str(announcement_id),
             "url": f"http://static.cninfo.com.cn/{item['adjunctUrl']}"
         }
@@ -387,8 +335,6 @@ class ReportCrawler:
         logging.info(f"报告类型: {self.config.category}")
         logging.info(f"板块: {self.config.plate}")
         logging.info(f"排除关键词: {', '.join(self.config.exclude_keywords)}")
-        logging.info("【量化提示】使用公告日期(announcement_date)避免前视偏差")
-        logging.info("【量化提示】org_id为巨潮唯一ID，比股票代码更稳定")
         logging.info("=" * 60)
 
         # 校验日期格式
