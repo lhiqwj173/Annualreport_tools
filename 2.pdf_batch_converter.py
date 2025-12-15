@@ -319,8 +319,12 @@ class PDFConverter:
 
 
 def _process_task(args: Tuple) -> bool:
-    """多进程任务包装函数。"""
-    converter, code, name, year, pdf_url = args
+    """多进程任务包装函数。
+    
+    每个进程创建独立的PDFConverter实例，避免requests.Session跨进程共享问题。
+    """
+    config, code, name, year, pdf_url = args
+    converter = PDFConverter(config)
     return converter.process_single_file(code, name, year, pdf_url)
 
 
@@ -393,9 +397,9 @@ class AnnualReportProcessor:
             logging.warning(f"未找到 {self.config.target_year} 年的数据")
             return
         
-        # 准备任务列表
+        # 准备任务列表（传递config而非converter实例，避免Session跨进程共享）
         tasks = [
-            (self.converter, row['公司代码'], row['公司简称'], row['年份'], row['年报链接'])
+            (self.config, row['公司代码'], row['公司简称'], row['年份'], row['年报链接'])
             for _, row in filtered_df.iterrows()
         ]
         

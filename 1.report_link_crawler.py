@@ -44,6 +44,7 @@ class CrawlerConfig:
     output_dir: str = "."  # 输出目录
     save_interval: int = 100  # 增量保存间隔（条数）
     strict_year_check: bool = True  # 是否严格检查年份匹配
+    page_delay: float = 0.3  # 页面间延迟（秒）
 
 
 class CNINFOClient:
@@ -124,43 +125,62 @@ class CNINFOClient:
     def fetch_all_pages(self, date_range: str) -> List[Dict[str, Any]]:
         """获取指定日期范围的所有页面数据。
         
+        使用hasMore字段判断是否继续翻页（API的totalpages字段存在Bug，会少1页）。
+        爬取完成后严格校验实际获取数量与API声称数量是否一致。
+        
         Args:
             date_range: 日期范围
             
         Returns:
             所有公告数据列表
+            
+        Raises:
+            RuntimeError: 获取页面数据失败时
+            AssertionError: 数据完整性校验失败时
         """
         all_results = []
+        page_num = 1
+        expected_total = None  # API声称的总数
         
-        # 先获取第一页，确定总页数
-        first_page_data = self.fetch_page(1, date_range)
-        if not first_page_data:
-            return all_results
-        
-        total_pages = first_page_data.get("totalpages", 0)
-        if total_pages == 0:
-            logging.info(f"日期范围 {date_range} 无数据")
-            return all_results
-        
-        # 处理第一页数据
-        announcements = first_page_data.get("announcements")
-        if announcements:
-            all_results.extend(announcements)
-        
-        # 获取剩余页面
-        for page_num in range(2, total_pages + 1):
+        while True:
             page_data = self.fetch_page(page_num, date_range)
-            if page_data:
-                announcements = page_data.get("announcements")
-                if announcements:
-                    all_results.extend(announcements)
+            if page_data is None:
+                raise RuntimeError(f"获取第{page_num}页失败: {date_range}")
+            
+            # 记录API声称的总数（仅第一页）
+            if page_num == 1:
+                expected_total = page_data.get("totalAnnouncement", 0)
+                if expected_total == 0:
+                    logging.info(f"日期范围 {date_range} 无数据")
+                    return all_results
+            
+            announcements = page_data.get("announcements")
+            if not announcements:
+                break
+            
+            all_results.extend(announcements)
             
             # 显示进度
-            progress = (page_num / total_pages) * 100
-            print(f"\r日期 {date_range}: {page_num}/{total_pages} 页 ({progress:.1f}%)", end='', flush=True)
+            print(f"\r日期 {date_range}: 第{page_num}页, 已获取 {len(all_results)}/{expected_total} 条", end='', flush=True)
+            
+            # 使用hasMore判断是否继续，而非totalpages
+            if not page_data.get("hasMore", False):
+                break
+            
+            page_num += 1
+            time.sleep(self.config.page_delay)
         
         print()  # 换行
-        logging.info(f"日期范围 {date_range} 完成，共获取 {len(all_results)} 条记录")
+        
+        # 严格校验：实际获取数量必须等于API声称数量
+        actual_count = len(all_results)
+        if expected_total is not None and actual_count != expected_total:
+            raise AssertionError(
+                f"数据完整性校验失败: {date_range} "
+                f"API声称{expected_total}条, 实际获取{actual_count}条"
+            )
+        
+        logging.info(f"日期范围 {date_range} 完成，共获取 {actual_count} 条记录")
         return all_results
 
 
@@ -312,6 +332,7 @@ class AnnualReportCrawler:
         logging.info(f"排除关键词: {', '.join(self.config.exclude_keywords)}")
         logging.info(f"增量保存间隔: 每{self.config.save_interval}条")
         logging.info(f"严格年份检查: {'开启' if self.config.strict_year_check else '关闭'}")
+        logging.info(f"页面间延迟: {self.config.page_delay}秒")
         logging.info("="*60)
         
         # 生成日期范围（按天）
@@ -387,6 +408,7 @@ if __name__ == '__main__':
     OUTPUT_DIR = "."  # 输出目录
     SAVE_INTERVAL = 100  # 增量保存间隔（每爬取N条就保存一次）
     STRICT_YEAR_CHECK = True  # 严格检查年份（只保留标题中年份与目标年份一致的记录）
+    PAGE_DELAY = 0.3  # 页面间延迟（秒），避免请求过快
     
     # 是否批量处理多个年份
     BATCH_MODE = False
@@ -409,7 +431,8 @@ if __name__ == '__main__':
                 timeout=TIMEOUT,
                 output_dir=OUTPUT_DIR,
                 save_interval=SAVE_INTERVAL,
-                strict_year_check=STRICT_YEAR_CHECK
+                strict_year_check=STRICT_YEAR_CHECK,
+                page_delay=PAGE_DELAY
             )
             
             crawler = AnnualReportCrawler(config)
@@ -428,7 +451,8 @@ if __name__ == '__main__':
             timeout=TIMEOUT,
             output_dir=OUTPUT_DIR,
             save_interval=SAVE_INTERVAL,
-            strict_year_check=STRICT_YEAR_CHECK
+            strict_year_check=STRICT_YEAR_CHECK,
+            page_delay=PAGE_DELAY
         )
         
         crawler = AnnualReportCrawler(config)

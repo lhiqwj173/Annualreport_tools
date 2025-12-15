@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Critical: Pagination Data Loss Bug** - Fixed API `totalpages` field bug causing last page data loss
+  - Changed pagination logic from `totalpages` to `hasMore` field for accurate page traversal
+  - Added strict data integrity validation: actual count must match API declared count
+  - Throws `AssertionError` on data mismatch instead of silent failure
+  - Throws `RuntimeError` on page fetch failure instead of silent skip
 - **PDF Conversion Fallback System** - Resolved Issue #4: PDF conversion failures
   - Added multi-library fallback mechanism for PDF processing
   - Primary: pdfplumber (most accurate)
@@ -13,8 +18,12 @@ All notable changes to this project will be documented in this file.
   - Suppressed CropBox warning messages from pdfplumber
   - Automatic library switching when one method fails
   - Improved error logging with library-specific debug messages
+- **Multiprocessing Session Sharing** - Fixed `requests.Session` cross-process sharing issue
+  - Each worker process now creates independent `PDFConverter` instance
+  - Improved stability in parallel PDF download/conversion
 
 ### Added
+- `page_delay` config parameter (default 0.3s) for rate limiting between page requests
 - Optional dependencies: PyPDF2 and pdfminer.six for better PDF compatibility
 - Detailed conversion method logging (shows which library succeeded)
 
