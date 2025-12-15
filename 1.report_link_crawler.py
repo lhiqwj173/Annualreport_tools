@@ -36,6 +36,7 @@ class CrawlerConfig:
     """爬虫配置类。"""
     target_year: int  # 目标年份
     exclude_keywords: List[str]  # 排除关键词列表
+    category: str = "category_ndbg_szsh"  # 报告类型
     trade: str = ""  # 行业过滤
     plate: str = "sz;sh"  # 板块控制
     max_retries: int = 3  # 最大重试次数
@@ -79,7 +80,7 @@ class CNINFOClient:
             "plate": self.config.plate,
             "searchkey": "",
             "secid": "",
-            "category": "category_ndbg_szsh",
+            "category": self.config.category,
             "trade": self.config.trade,
             "seDate": date_range,
             "sortName": "code",
@@ -327,6 +328,7 @@ class AnnualReportCrawler:
         logging.info("="*60)
         logging.info("巨潮资讯年报爬虫启动")
         logging.info(f"目标年份: {self.config.target_year}")
+        logging.info(f"报告类型: {self.config.category}")
         logging.info(f"板块: {self.config.plate}")
         logging.info(f"行业: {self.config.trade if self.config.trade else '全部'}")
         logging.info(f"排除关键词: {', '.join(self.config.exclude_keywords)}")
@@ -392,7 +394,7 @@ if __name__ == '__main__':
     # 目标年份
     TARGET_YEAR = 2024
     # 排除关键词列表（可加入'更正后'、'修订版'等）
-    EXCLUDE_KEYWORDS = ['英文', '已取消', '摘要']
+    EXCLUDE_KEYWORDS = ['英文']
     
     # 行业过滤（为空则不过滤）
     # 参考内容："农、林、牧、渔业;电力、热力、燃气及水生产和供应业;建筑业;采矿业;制造业;批发和零售业;交通运输、仓储和邮政业;住宿和餐饮业;信息传输、软件和信息技术服务业;金融业;房地产业;租赁和商务服务业;科学研究和技术服务业;水利、环境和公共设施管理业;居民服务、修理和其他服务业;教育;卫生和社会工作;文化、体育和娱乐业;综合"
@@ -401,20 +403,24 @@ if __name__ == '__main__':
     # 板块控制：深市sz 沪市sh 深主板szmb 沪主板shmb 创业板szcy 科创板shkcp 北交所bj
     PLATE = "sz;sh"
     
+    # 报告类型：年报category_ndbg_szsh 半年报category_bndbg_szsh 一季报category_yjdbg_szsh 三季报category_sjdbg_szsh
+    # 多类型用分号分隔，如 "category_ndbg_szsh;category_bndbg_szsh"
+    CATEGORY = "category_ndbg_szsh;category_bndbg_szsh;category_yjdbg_szsh;category_sjdbg_szsh"
+    
     # 爬虫配置
     MAX_RETRIES = 3  # 最大重试次数
     RETRY_DELAY = 5  # 重试延迟（秒）
     TIMEOUT = 10  # 请求超时（秒）
     OUTPUT_DIR = "."  # 输出目录
     SAVE_INTERVAL = 100  # 增量保存间隔（每爬取N条就保存一次）
-    STRICT_YEAR_CHECK = True  # 严格检查年份（只保留标题中年份与目标年份一致的记录）
+    STRICT_YEAR_CHECK = False  # 严格检查年份（只保留标题中年份与目标年份一致的记录）
     PAGE_DELAY = 0.3  # 页面间延迟（秒），避免请求过快
     
     # 是否批量处理多个年份
-    BATCH_MODE = False
+    BATCH_MODE = True
     # 批量模式：年份范围
-    START_YEAR = 2020
-    END_YEAR = 2023
+    START_YEAR = 2007
+    END_YEAR = 2025
     
     # ==================== 执行逻辑 ====================
     
@@ -424,6 +430,7 @@ if __name__ == '__main__':
             config = CrawlerConfig(
                 target_year=year,
                 exclude_keywords=EXCLUDE_KEYWORDS,
+                category=CATEGORY,
                 trade=TRADE,
                 plate=PLATE,
                 max_retries=MAX_RETRIES,
@@ -444,6 +451,7 @@ if __name__ == '__main__':
         config = CrawlerConfig(
             target_year=TARGET_YEAR,
             exclude_keywords=EXCLUDE_KEYWORDS,
+            category=CATEGORY,
             trade=TRADE,
             plate=PLATE,
             max_retries=MAX_RETRIES,
