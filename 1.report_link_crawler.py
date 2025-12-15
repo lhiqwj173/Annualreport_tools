@@ -321,13 +321,14 @@ class ReportCrawler:
 
         # 提取报告期年份（API的category已做主要筛选，这里仅提取年份）
         year_match = re.search(r"(\d{4})年", title)
-        if not year_match:
-            # 标题中无年份信息是数据异常，严格抛出
-            raise RuntimeError(f"标题中无年份信息，无法解析报告期: {title}")
-        report_year = int(year_match.group(1))
-
-        # 报告期逻辑校验
-        self._validate_report_year(report_year, announcement_date, title)
+        if year_match:
+            report_year: Optional[int] = int(year_match.group(1))
+            # 报告期逻辑校验
+            self._validate_report_year(report_year, announcement_date, title)
+        else:
+            # 标题中无年份信息，标记为未知，后续从PDF正文提取
+            report_year = None
+            logging.warning(f"标题中无年份信息，report_year标记为未知: {title}")
 
         # 严格校验关键ID字段
         org_id = item.get("orgId")
@@ -346,7 +347,7 @@ class ReportCrawler:
             "company_name": item["secName"],
             "org_id": str(org_id),
             "title": title,
-            "report_year": str(report_year),
+            "report_year": str(report_year) if report_year is not None else "未知",
             "announcement_date": announcement_date,
             "period_type": self._identify_period_type(title),
             "report_type": self._identify_report_type(title),
