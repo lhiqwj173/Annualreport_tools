@@ -50,7 +50,6 @@ class CrawlerConfig:
     output_dir: str = "."  # 输出目录
     save_interval: int = 500  # 增量保存间隔（条数）
     page_delay: float = 0.3  # 页面间延迟（秒）
-    progress_file: str = "crawler_progress.txt"  # 断点续爬进度文件
 
 
 class CNINFOClient:
@@ -310,21 +309,22 @@ class ReportCrawler:
 
     def _get_progress_path(self) -> Path:
         """获取进度文件路径。"""
-        return Path(self.config.output_dir) / self.config.progress_file
+        return Path(self.config.output_dir) / "crawler_progress.txt"
 
-    def _load_completed_dates(self) -> set:
-        """加载已完成的日期集合。"""
+    def _load_last_completed_date(self) -> Optional[str]:
+        """从进度文件加载最后完成的日期。"""
         progress_path = self._get_progress_path()
         if not progress_path.exists():
-            return set()
+            return None
         with open(progress_path, 'r', encoding='utf-8') as f:
-            return set(line.strip() for line in f if line.strip())
+            content = f.read().strip()
+            return content if content else None
 
-    def _save_completed_date(self, date_range: str) -> None:
-        """保存已完成的日期到进度文件。"""
+    def _save_last_completed_date(self, date_str: str) -> None:
+        """保存最后完成的日期到进度文件（覆盖写入）。"""
         progress_path = self._get_progress_path()
-        with open(progress_path, 'a', encoding='utf-8') as f:
-            f.write(f"{date_range}\n")
+        with open(progress_path, 'w', encoding='utf-8') as f:
+            f.write(date_str)
 
     def run(self) -> None:
         """执行爬取任务。所有异常严格向上抛出，不静默处理。"""
@@ -352,12 +352,16 @@ class ReportCrawler:
                 f"日期范围无效: {self.config.start_date} ~ {self.config.end_date}，未生成任何日期"
             )
 
-        # 断点续爬：加载已完成的日期，过滤掉
-        completed_dates = self._load_completed_dates()
-        if completed_dates:
-            logging.info(f"检测到进度文件，已完成 {len(completed_dates)} 个日期")
-        date_ranges = [d for d in all_date_ranges if d not in completed_dates]
-        logging.info(f"共 {len(all_date_ranges)} 个日期，待爬取 {len(date_ranges)} 个")
+        # 断点续爬：从最后完成日期的下一天开始
+        last_completed = self._load_last_completed_date()
+        if last_completed:
+            # 过滤掉已完成的日期
+            date_ranges = [d for d in all_date_ranges if d.split("~")[0] > last_completed]
+            logging.info(f"检测到进度文件，上次完成: {last_completed}")
+            logging.info(f"共 {len(all_date_ranges)} 个日期，待爬取 {len(date_ranges)} 个")
+        else:
+            date_ranges = all_date_ranges
+            logging.info(f"共 {len(all_date_ranges)} 个日期")
 
         if not date_ranges:
             logging.info("所有日期已爬取完成，无需继续")
@@ -369,9 +373,7 @@ class ReportCrawler:
         # 初始化CSV文件
         self._init_csv(output_path)
 
-        # 运行模式判断
-        is_resume = len(completed_dates) > 0
-        if is_resume:
+        if last_completed:
             logging.info("【增量模式】从上次中断位置继续爬取")
         else:
             logging.info("【全量模式】首次运行，从头开始爬取")
@@ -402,8 +404,8 @@ class ReportCrawler:
                     total_saved += len(daily_parsed)
                     logging.info(f"已保存 {len(daily_parsed)} 条，累计: {total_saved} 条")
 
-                # 数据已持久化后，才记录进度
-                self._save_completed_date(date_range)
+                # 数据已持久化后，更新进度（只记录日期部分）
+                self._save_last_completed_date(date_range.split("~")[0])
 
                 if idx < len(date_ranges):
                     time.sleep(0.5)
@@ -417,7 +419,6 @@ class ReportCrawler:
         logging.info("=" * 60)
         logging.info(f"爬取完成: 原始{total_raw}条, 过滤{filtered}条, 有效{total_saved}条")
         logging.info(f"保存路径: {output_path}")
-        logging.info(f"进度文件: {self._get_progress_path()}")
         logging.info("=" * 60)
 
 
@@ -450,8 +451,6 @@ if __name__ == '__main__':
     OUTPUT_DIR = "."
     SAVE_INTERVAL = 500
     PAGE_DELAY = 0.3
-    PROGRESS_FILE = "crawler_progress.txt"  # 断点续爬进度文件
-
     # ==================== 执行 ====================
 
     config = CrawlerConfig(
@@ -466,8 +465,7 @@ if __name__ == '__main__':
         timeout=TIMEOUT,
         output_dir=OUTPUT_DIR,
         save_interval=SAVE_INTERVAL,
-        page_delay=PAGE_DELAY,
-        progress_file=PROGRESS_FILE
+        page_delay=PAGE_DELAY
     )
 
     crawler = ReportCrawler(config)
