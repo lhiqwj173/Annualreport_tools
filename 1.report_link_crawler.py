@@ -233,7 +233,7 @@ class ReportCrawler:
 
     CSV_HEADERS = [
         "company_code", "company_name", "title",
-        "announcement_date", "announcement_id", "url"
+        "announcement_time", "announcement_id", "url"
     ]
 
     def __init__(self, config: CrawlerConfig) -> None:
@@ -250,12 +250,10 @@ class ReportCrawler:
         return any(kw in title for kw in self.config.exclude_keywords)
 
     def _parse_announcement_time(self, timestamp_ms: int) -> str:
-        """解析公告时间戳，显式指定Asia/Shanghai时区避免云端UTC环境的日期偏差。"""
-        # 巨潮服务器返回的时间戳是UTC+8，必须显式指定时区
-        # 否则在云端容器（通常是UTC）运行时，23:00发布的公告日期会偏差一天
+        """解析公告时间戳，显式指定Asia/Shanghai时区。"""
         tz_shanghai = ZoneInfo("Asia/Shanghai")
         dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=tz_shanghai)
-        return dt.strftime("%Y-%m-%d")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 
@@ -280,7 +278,7 @@ class ReportCrawler:
             raise RuntimeError(
                 f"announcementTime类型异常，期望数值，实际: {type(announcement_time).__name__}。标题: {title}"
             )
-        announcement_date = self._parse_announcement_time(int(announcement_time))
+        announcement_time_str = self._parse_announcement_time(int(announcement_time))
 
         # 严格校验公告ID字段
         announcement_id = item.get("announcementId")
@@ -291,7 +289,7 @@ class ReportCrawler:
             "company_code": item["secCode"],
             "company_name": item["secName"],
             "title": title,
-            "announcement_date": announcement_date,
+            "announcement_time": announcement_time_str,
             "announcement_id": str(announcement_id),
             "url": f"http://static.cninfo.com.cn/{item['adjunctUrl']}"
         }
