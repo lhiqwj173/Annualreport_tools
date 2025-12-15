@@ -289,10 +289,14 @@ class ReportCrawler:
     def _validate_report_year(self, report_year: int, pub_date: str, title: str) -> None:
         """校验报告期年份与公告日期的逻辑一致性。严格抛出异常。"""
         pub_year = int(pub_date[:4])
-        # 报告期年份不能晚于公告年份
-        if report_year > pub_year:
+        
+        # 盈利预测报告允许预测下一年度，放宽1年
+        is_forecast = "预测" in title or "预告" in title
+        max_allowed_year = pub_year + 1 if is_forecast else pub_year
+        
+        if report_year > max_allowed_year:
             raise ValueError(
-                f"报告期校验失败: 报告期年份({report_year})晚于公告年份({pub_year})。"
+                f"报告期校验失败: 报告期年份({report_year})超出允许范围(最大{max_allowed_year})。"
                 f"公告日期: {pub_date}, 标题: {title}"
             )
 
@@ -320,9 +324,15 @@ class ReportCrawler:
         announcement_date = self._parse_announcement_time(int(announcement_time))
 
         # 提取报告期年份（API的category已做主要筛选，这里仅提取年份）
-        year_match = re.search(r"(\d{4})年", title)
-        if year_match:
-            report_year: Optional[int] = int(year_match.group(1))
+        # 优先匹配跨年格式如"2007-2008年度"，提取起始年份
+        cross_year_match = re.search(r"(\d{4})[-—](\d{4})年", title)
+        if cross_year_match:
+            report_year: Optional[int] = int(cross_year_match.group(1))
+        else:
+            year_match = re.search(r"(\d{4})年", title)
+            report_year = int(year_match.group(1)) if year_match else None
+        
+        if report_year is not None:
             # 报告期逻辑校验
             self._validate_report_year(report_year, announcement_date, title)
         else:
