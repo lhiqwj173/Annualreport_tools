@@ -82,13 +82,13 @@ class CNINFOClient:
         self.session.mount('http://', HTTPAdapter(max_retries=retries))
         self.session.mount('https://', HTTPAdapter(max_retries=retries))
 
-    def _build_request_data(self, page_num: int, date_range: str) -> Dict[str, Any]:
+    def _build_request_data(self, page_num: int, date_range: str, plate: Optional[str] = None) -> Dict[str, Any]:
         return {
             "pageNum": page_num,
             "pageSize": 30,
             "column": "szse",
             "tabName": "fulltext",
-            "plate": self.config.plate,
+            "plate": plate if plate else self.config.plate,
             "searchkey": "",
             "secid": "",
             "category": self.config.category,
@@ -99,9 +99,9 @@ class CNINFOClient:
             "isHLtitle": "false"
         }
 
-    def fetch_page(self, page_num: int, date_range: str) -> Dict[str, Any]:
+    def fetch_page(self, page_num: int, date_range: str, plate: Optional[str] = None) -> Dict[str, Any]:
         """获取单页数据。失败时抛出异常。"""
-        data = self._build_request_data(page_num, date_range)
+        data = self._build_request_data(page_num, date_range, plate)
         last_error: Optional[Exception] = None
 
         for attempt in range(1, self.config.max_retries + 1):
@@ -138,14 +138,57 @@ class CNINFOClient:
             f"获取数据失败（已重试{self.config.max_retries}次）: {date_range} 第{page_num}页。最后错误: {last_error}"
         )
 
-    def fetch_all_pages(self, date_range: str) -> List[Dict[str, Any]]:
-        """获取指定日期范围的所有页面数据。"""
+    # API单次查询最大返回条数限制
+    API_MAX_RESULTS = 3000
+
+    def _fetch_by_split_plates(self, date_range: str) -> List[Dict[str, Any]]:
+        """
+        分板块查询数据，用于绕过API的3000条限制。
+        将 "sz;sh" 拆分为单独的 "sz" 和 "sh" 分别查询。
+        """
+        # 解析配置中的板块
+        plates = [p.strip() for p in self.config.plate.split(";") if p.strip()]
+        if len(plates) <= 1:
+            raise RuntimeError(
+                f"无法分板块查询: 配置的plate='{self.config.plate}'只有一个板块，"
+                f"但日期{date_range}数据量超过{self.API_MAX_RESULTS}条限制"
+            )
+        
+        all_results = []
+        seen_ids: set = set()
+        
+        for plate in plates:
+            logging.info(f"  分板块查询: {date_range} plate={plate}")
+            plate_results = self.fetch_all_pages(date_range, plate_override=plate)
+            
+            # 去重（理论上不同板块不会重复，但保险起见）
+            for item in plate_results:
+                ann_id = item.get("announcementId")
+                if ann_id not in seen_ids:
+                    seen_ids.add(ann_id)
+                    all_results.append(item)
+            
+            logging.info(f"    获取 {len(plate_results)} 条，累计 {len(all_results)} 条")
+            time.sleep(self.config.page_delay)
+        
+        return all_results
+
+    def fetch_all_pages(self, date_range: str, plate_override: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        获取指定日期范围的所有页面数据。
+        
+        Args:
+            date_range: 日期范围，格式 "YYYY-MM-DD~YYYY-MM-DD"
+            plate_override: 可选，覆盖配置中的板块设置（用于分板块查询）
+        """
         all_results = []
         page_num = 1
         expected_total: Optional[int] = None
+        seen_ids: set = set()  # 用于检测重复数据
+        current_plate = plate_override if plate_override else self.config.plate
 
         while True:
-            page_data = self.fetch_page(page_num, date_range)
+            page_data = self.fetch_page(page_num, date_range, current_plate)
 
             if page_num == 1:
                 # 严格校验首页响应结构
@@ -159,8 +202,15 @@ class CNINFOClient:
                         f"totalAnnouncement类型异常，期望int，实际: {type(expected_total).__name__}"
                     )
                 if expected_total == 0:
-                    logging.info(f"日期 {date_range}: 无公告数据")
+                    logging.info(f"日期 {date_range} (plate={current_plate}): 无公告数据")
                     return all_results
+                
+                # 检查是否超过API限制，需要分板块查询
+                if expected_total > self.API_MAX_RESULTS and plate_override is None:
+                    logging.info(
+                        f"日期 {date_range} 数据量({expected_total})超过API限制({self.API_MAX_RESULTS})，启用分板块查询"
+                    )
+                    return self._fetch_by_split_plates(date_range)
 
             # 严格校验announcements字段
             if "announcements" not in page_data:
@@ -183,8 +233,42 @@ class CNINFOClient:
                     f"announcements类型异常，期望list，实际: {type(announcements).__name__}"
                 )
 
+            # 关键修复：如果返回空列表，说明已无更多数据，立即终止
+            if len(announcements) == 0:
+                logging.debug(f"日期 {date_range} 第{page_num}页返回空列表，终止翻页")
+                break
+
+            # 重复数据检测：API在超出实际页数后会循环返回第1页数据
+            current_page_ids = set()
+            for item in announcements:
+                ann_id = item.get("announcementId")
+                if ann_id is not None:
+                    current_page_ids.add(ann_id)
+            
+            # 严格检测：当前页数据是否全部重复（API分页循环bug）
+            if current_page_ids and current_page_ids.issubset(seen_ids):
+                raise AssertionError(
+                    f"API分页异常: {date_range} 第{page_num}页全部{len(current_page_ids)}条数据已存在。"
+                    f"API在超出实际数据量后循环返回第1页数据。"
+                    f"已获取{len(all_results)}条，API声称{expected_total}条。"
+                    f"请检查API限制或尝试分板块查询。"
+                )
+            
+            seen_ids.update(current_page_ids)
             all_results.extend(announcements)
+            
+            # 严格检测：已获取数量超过API声称的总数
+            if expected_total is not None and len(all_results) > expected_total:
+                raise AssertionError(
+                    f"数据量异常: {date_range} 已获取{len(all_results)}条，超过API声称的{expected_total}条。"
+                    f"当前第{page_num}页。API可能存在数据不一致问题。"
+                )
+            
             print(f"\r日期 {date_range}: 第{page_num}页, 已获取 {len(all_results)}/{expected_total} 条", end='', flush=True)
+
+            # 正常终止：达到API声称的总数
+            if expected_total is not None and len(all_results) == expected_total:
+                break
 
             # 严格校验hasMore字段
             if "hasMore" not in page_data:
@@ -200,10 +284,11 @@ class CNINFOClient:
 
         print()
 
-        # 严格校验数据完整性
+        # 严格数据完整性校验
         if expected_total is not None and len(all_results) != expected_total:
             raise AssertionError(
-                f"数据完整性校验失败: {date_range} API声称{expected_total}条, 实际获取{len(all_results)}条"
+                f"数据完整性校验失败: {date_range} (plate={current_plate}) "
+                f"API声称{expected_total}条, 实际获取{len(all_results)}条, 差异{len(all_results) - expected_total}条"
             )
 
         return all_results
