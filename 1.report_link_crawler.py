@@ -103,6 +103,7 @@ class CNINFOClient:
     def fetch_page(self, page_num: int, date_range: str) -> Dict[str, Any]:
         """获取单页数据。失败时抛出异常。"""
         data = self._build_request_data(page_num, date_range)
+        last_error: Optional[Exception] = None
 
         for attempt in range(1, self.config.max_retries + 1):
             try:
@@ -110,36 +111,89 @@ class CNINFOClient:
                     self.BASE_URL, data=data, timeout=self.config.timeout
                 )
                 response.raise_for_status()
-                return response.json()
-            except (requests.exceptions.RequestException, ValueError) as e:
-                logging.warning(f"请求失败 (尝试 {attempt}/{self.config.max_retries}): {e}")
+                
+                # 显式处理JSON解析，区分网络错误和数据格式错误
+                try:
+                    result = response.json()
+                except ValueError as json_err:
+                    raise RuntimeError(
+                        f"JSON解析失败: {json_err}。响应内容前200字符: {response.text[:200]}"
+                    ) from json_err
+                
+                # 校验响应结构完整性
+                if not isinstance(result, dict):
+                    raise RuntimeError(f"API响应格式异常，期望dict，实际: {type(result).__name__}")
+                
+                return result
+                
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                logging.warning(f"网络请求失败 (尝试 {attempt}/{self.config.max_retries}): {e}")
                 if attempt < self.config.max_retries:
                     time.sleep(self.config.retry_delay)
+            except RuntimeError:
+                # JSON解析或响应格式错误，不重试，直接抛出
+                raise
 
-        raise RuntimeError(f"获取数据失败（已重试{self.config.max_retries}次）: {date_range} 第{page_num}页")
+        raise RuntimeError(
+            f"获取数据失败（已重试{self.config.max_retries}次）: {date_range} 第{page_num}页。最后错误: {last_error}"
+        )
 
     def fetch_all_pages(self, date_range: str) -> List[Dict[str, Any]]:
         """获取指定日期范围的所有页面数据。"""
         all_results = []
         page_num = 1
-        expected_total = None
+        expected_total: Optional[int] = None
 
         while True:
             page_data = self.fetch_page(page_num, date_range)
 
             if page_num == 1:
-                expected_total = page_data.get("totalAnnouncement", 0)
+                # 严格校验首页响应结构
+                if "totalAnnouncement" not in page_data:
+                    raise RuntimeError(
+                        f"API响应缺少totalAnnouncement字段: {date_range}。响应keys: {list(page_data.keys())}"
+                    )
+                expected_total = page_data["totalAnnouncement"]
+                if not isinstance(expected_total, int):
+                    raise RuntimeError(
+                        f"totalAnnouncement类型异常，期望int，实际: {type(expected_total).__name__}"
+                    )
                 if expected_total == 0:
+                    logging.info(f"日期 {date_range}: 无公告数据")
                     return all_results
 
-            announcements = page_data.get("announcements")
-            if not announcements:
+            # 严格校验announcements字段
+            if "announcements" not in page_data:
+                raise RuntimeError(
+                    f"API响应缺少announcements字段: {date_range} 第{page_num}页"
+                )
+            
+            announcements = page_data["announcements"]
+            
+            # announcements为None表示该页无数据（正常结束）
+            if announcements is None:
+                if page_num == 1 and expected_total > 0:
+                    raise RuntimeError(
+                        f"数据异常: {date_range} 声称有{expected_total}条数据，但首页announcements为None"
+                    )
                 break
+            
+            if not isinstance(announcements, list):
+                raise RuntimeError(
+                    f"announcements类型异常，期望list，实际: {type(announcements).__name__}"
+                )
 
             all_results.extend(announcements)
             print(f"\r日期 {date_range}: 第{page_num}页, 已获取 {len(all_results)}/{expected_total} 条", end='', flush=True)
 
-            if not page_data.get("hasMore", False):
+            # 严格校验hasMore字段
+            if "hasMore" not in page_data:
+                raise RuntimeError(
+                    f"API响应缺少hasMore字段: {date_range} 第{page_num}页"
+                )
+            
+            if not page_data["hasMore"]:
                 break
 
             page_num += 1
@@ -243,47 +297,63 @@ class ReportCrawler:
             )
 
     def _parse_announcement(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """解析单条公告数据。"""
-        try:
-            title = self._clean_title(item["announcementTitle"])
+        """解析单条公告数据。返回None仅表示被排除关键词过滤，其他情况严格抛出异常。"""
+        # 严格校验必要字段存在性
+        required_fields = ["announcementTitle", "announcementTime", "secCode", "secName", "adjunctUrl"]
+        missing_fields = [f for f in required_fields if f not in item]
+        if missing_fields:
+            raise RuntimeError(f"解析公告数据失败，缺少必要字段: {missing_fields}。数据: {item}")
+        
+        title = self._clean_title(item["announcementTitle"])
 
-            if self._should_exclude(title):
-                return None
+        # 排除关键词过滤 - 唯一允许返回None的情况
+        if self._should_exclude(title):
+            logging.debug(f"关键词过滤: {title}")
+            return None
 
-            # 提取公告日期 - 避免前视偏差的核心字段
-            announcement_time = item.get("announcementTime")
-            if announcement_time is None:
-                raise KeyError("缺少announcementTime字段")
-            announcement_date = self._parse_announcement_time(announcement_time)
+        # 提取公告日期 - 避免前视偏差的核心字段
+        announcement_time = item["announcementTime"]
+        if not isinstance(announcement_time, (int, float)):
+            raise RuntimeError(
+                f"announcementTime类型异常，期望数值，实际: {type(announcement_time).__name__}。标题: {title}"
+            )
+        announcement_date = self._parse_announcement_time(int(announcement_time))
 
-            # 提取报告期年份（API的category已做主要筛选，这里仅提取年份）
-            year_match = re.search(r"(\d{4})年", title)
-            if not year_match:
-                logging.debug(f"标题中无年份信息，跳过: {title}")
-                return None
-            report_year = int(year_match.group(1))
+        # 提取报告期年份（API的category已做主要筛选，这里仅提取年份）
+        year_match = re.search(r"(\d{4})年", title)
+        if not year_match:
+            # 标题中无年份信息是数据异常，严格抛出
+            raise RuntimeError(f"标题中无年份信息，无法解析报告期: {title}")
+        report_year = int(year_match.group(1))
 
-            # 报告期逻辑校验
-            self._validate_report_year(report_year, announcement_date, title)
+        # 报告期逻辑校验
+        self._validate_report_year(report_year, announcement_date, title)
 
-            # 识别是否为更正/修订版本
-            is_correction = 1 if any(w in title for w in ["更正", "修订", "补充", "更新"]) else 0
+        # 严格校验关键ID字段
+        org_id = item.get("orgId")
+        if org_id is None:
+            raise RuntimeError(f"缺少orgId字段，无法唯一标识公司: {title}")
+        
+        announcement_id = item.get("announcementId")
+        if announcement_id is None:
+            raise RuntimeError(f"缺少announcementId字段，无法唯一标识公告: {title}")
 
-            return {
-                "company_code": item["secCode"],
-                "company_name": item["secName"],
-                "org_id": item.get("orgId", ""),  # 巨潮唯一ID，比股票代码更稳定
-                "title": title,
-                "report_year": str(report_year),
-                "announcement_date": announcement_date,
-                "period_type": self._identify_period_type(title),
-                "report_type": self._identify_report_type(title),
-                "is_correction": is_correction,
-                "announcement_id": str(item.get("announcementId", "")),
-                "url": f"http://static.cninfo.com.cn/{item['adjunctUrl']}"
-            }
-        except KeyError as e:
-            raise RuntimeError(f"解析公告数据失败，缺少必要字段: {e}")
+        # 识别是否为更正/修订版本
+        is_correction = 1 if any(w in title for w in ["更正", "修订", "补充", "更新"]) else 0
+
+        return {
+            "company_code": item["secCode"],
+            "company_name": item["secName"],
+            "org_id": str(org_id),
+            "title": title,
+            "report_year": str(report_year),
+            "announcement_date": announcement_date,
+            "period_type": self._identify_period_type(title),
+            "report_type": self._identify_report_type(title),
+            "is_correction": is_correction,
+            "announcement_id": str(announcement_id),
+            "url": f"http://static.cninfo.com.cn/{item['adjunctUrl']}"
+        }
 
     def _init_csv(self, output_path: Path) -> None:
         """初始化CSV文件（写入表头）。"""
@@ -317,7 +387,7 @@ class ReportCrawler:
             f.write(f"{date_range}\n")
 
     def run(self) -> None:
-        """执行爬取任务。"""
+        """执行爬取任务。所有异常严格向上抛出，不静默处理。"""
         logging.info("=" * 60)
         logging.info("巨潮资讯定期报告爬虫启动")
         logging.info(f"日期范围: {self.config.start_date} ~ {self.config.end_date}")
@@ -328,9 +398,21 @@ class ReportCrawler:
         logging.info("【量化提示】org_id为巨潮唯一ID，比股票代码更稳定")
         logging.info("=" * 60)
 
+        # 校验日期格式
+        try:
+            datetime.strptime(self.config.start_date, "%Y-%m-%d")
+            datetime.strptime(self.config.end_date, "%Y-%m-%d")
+        except ValueError as e:
+            raise ValueError(f"日期格式错误，期望YYYY-MM-DD: {e}") from e
+
         all_date_ranges = DateRangeGenerator.generate_daily_ranges(
             self.config.start_date, self.config.end_date
         )
+        
+        if not all_date_ranges:
+            raise ValueError(
+                f"日期范围无效: {self.config.start_date} ~ {self.config.end_date}，未生成任何日期"
+            )
 
         # 断点续爬：加载已完成的日期，过滤掉
         completed_dates = self._load_completed_dates()
@@ -359,31 +441,40 @@ class ReportCrawler:
         total_saved = 0
         total_raw = 0
         filtered = 0
+        current_date_range: Optional[str] = None
 
-        for idx, date_range in enumerate(date_ranges, 1):
-            logging.info(f"[{idx}/{len(date_ranges)}] 正在爬取: {date_range}")
-            results = self.client.fetch_all_pages(date_range)
-            total_raw += len(results)
+        try:
+            for idx, date_range in enumerate(date_ranges, 1):
+                current_date_range = date_range
+                logging.info(f"[{idx}/{len(date_ranges)}] 正在爬取: {date_range}")
+                results = self.client.fetch_all_pages(date_range)
+                total_raw += len(results)
 
-            daily_parsed = []
-            for item in results:
-                parsed = self._parse_announcement(item)
-                if parsed:
-                    daily_parsed.append(parsed)
-                else:
-                    filtered += 1
+                daily_parsed = []
+                for item in results:
+                    parsed = self._parse_announcement(item)
+                    if parsed:
+                        daily_parsed.append(parsed)
+                    else:
+                        filtered += 1
 
-            # 关键：先写入CSV，再记录进度，确保数据不丢失
-            if daily_parsed:
-                self._append_to_csv(daily_parsed, output_path)
-                total_saved += len(daily_parsed)
-                logging.info(f"已保存 {len(daily_parsed)} 条，累计: {total_saved} 条")
+                # 关键：先写入CSV，再记录进度，确保数据不丢失
+                if daily_parsed:
+                    self._append_to_csv(daily_parsed, output_path)
+                    total_saved += len(daily_parsed)
+                    logging.info(f"已保存 {len(daily_parsed)} 条，累计: {total_saved} 条")
 
-            # 数据已持久化后，才记录进度
-            self._save_completed_date(date_range)
+                # 数据已持久化后，才记录进度
+                self._save_completed_date(date_range)
 
-            if idx < len(date_ranges):
-                time.sleep(0.5)
+                if idx < len(date_ranges):
+                    time.sleep(0.5)
+
+        except Exception as e:
+            logging.error(f"爬取过程中发生异常，当前日期: {current_date_range}")
+            logging.error(f"已完成: 原始{total_raw}条, 过滤{filtered}条, 有效{total_saved}条")
+            logging.error(f"进度已保存，可重新运行继续爬取")
+            raise RuntimeError(f"爬取失败于 {current_date_range}: {e}") from e
 
         logging.info("=" * 60)
         logging.info(f"爬取完成: 原始{total_raw}条, 过滤{filtered}条, 有效{total_saved}条")
