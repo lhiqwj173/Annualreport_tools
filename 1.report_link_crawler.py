@@ -426,7 +426,7 @@ class ReportCrawler:
             logging.info("所有日期已爬取完成，无需继续")
             return
 
-        output_filename = f"定期报告链接_{self.config.start_date}_{self.config.end_date}.csv"
+        output_filename = "财报公告链接.csv"
         output_path = Path(self.config.output_dir) / output_filename
 
         # 初始化CSV文件
