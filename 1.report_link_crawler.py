@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+from zoneinfo import ZoneInfo
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -197,7 +198,12 @@ class ReportCrawler:
         return any(kw in title for kw in self.config.exclude_keywords)
 
     def _parse_announcement_time(self, timestamp_ms: int) -> str:
-        return datetime.fromtimestamp(timestamp_ms / 1000).strftime("%Y-%m-%d")
+        """解析公告时间戳，显式指定Asia/Shanghai时区避免云端UTC环境的日期偏差。"""
+        # 巨潮服务器返回的时间戳是UTC+8，必须显式指定时区
+        # 否则在云端容器（通常是UTC）运行时，23:00发布的公告日期会偏差一天
+        tz_shanghai = ZoneInfo("Asia/Shanghai")
+        dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=tz_shanghai)
+        return dt.strftime("%Y-%m-%d")
 
     def _identify_report_type(self, title: str) -> str:
         if "摘要" in title:
@@ -207,6 +213,15 @@ class ReportCrawler:
         return "正式"
 
     def _identify_period_type(self, title: str) -> str:
+        # 业绩预告需要优先判断，因为可能包含"年度"等关键词
+        if "业绩预告" in title:
+            if "半年" in title or "中期" in title:
+                return "半年报业绩预告"
+            if "第一季" in title or "一季" in title:
+                return "一季报业绩预告"
+            if "第三季" in title or "三季" in title:
+                return "三季报业绩预告"
+            return "年报业绩预告"
         if "半年" in title or "中期" in title:
             return "半年报"
         if "第一季" in title or "一季" in title:
@@ -241,7 +256,7 @@ class ReportCrawler:
                 raise KeyError("缺少announcementTime字段")
             announcement_date = self._parse_announcement_time(announcement_time)
 
-            # 提取报告期年份
+            # 提取报告期年份（API的category已做主要筛选，这里仅提取年份）
             year_match = re.search(r"(\d{4})年", title)
             if not year_match:
                 logging.debug(f"标题中无年份信息，跳过: {title}")
@@ -393,8 +408,8 @@ if __name__ == '__main__':
     # 板块控制：深市sz 沪市sh（不含北交所bj）
     PLATE = "sz;sh"
 
-    # 报告类型：年报/半年报/一季报/三季报
-    CATEGORY = "category_ndbg_szsh;category_bndbg_szsh;category_yjdbg_szsh;category_sjdbg_szsh"
+    # 报告类型：年报/半年报/一季报/三季报/业绩预告
+    CATEGORY = "category_ndbg_szsh;category_bndbg_szsh;category_yjdbg_szsh;category_sjdbg_szsh;category_yjygjxz_szsh"
 
     # 行业过滤（为空则不过滤）
     TRADE = ""

@@ -4,7 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Performance Forecast Support** - Added `category_yjygjxz_szsh` to crawl performance forecasts (业绩预告)
+  - Extended `_identify_period_type` to classify forecast types (年报业绩预告/半年报业绩预告/一季报业绩预告/三季报业绩预告)
+  - Enables more timely factor signals despite lower data precision
+
 ### Fixed
+- **Critical: Timezone Handling** - Fixed potential date offset in cloud environments
+  - Explicitly set `Asia/Shanghai` timezone for timestamp parsing
+  - Prevents Look-ahead bias in backtesting when running in UTC containers
+
 - **Critical: Pagination Data Loss Bug** - Fixed API `totalpages` field bug causing last page data loss
   - Changed pagination logic from `totalpages` to `hasMore` field for accurate page traversal
   - Added strict data integrity validation: actual count must match API declared count
