@@ -234,7 +234,7 @@ class ReportCrawler:
 
     CSV_HEADERS = [
         "company_code", "company_name", "org_id", "title", "report_year",
-        "announcement_date", "period_type", "report_type", "is_correction",
+        "announcement_date", "report_type", "is_correction",
         "announcement_id", "url"
     ]
 
@@ -268,30 +268,6 @@ class ReportCrawler:
         if any(kw in title for kw in self.CORRECTION_KEYWORDS):
             return "修订"
         return "正式"
-
-    def _identify_period_type(self, title: str) -> str:
-        # 业绩类公告优先判断（可能包含"年度"等关键词）
-        # 业绩预告/预增/预减/预亏/预盈/业绩快报
-        performance_keywords = ["业绩预告", "业绩预增", "业绩预减", "业绩预亏", "业绩预盈", 
-                                "业绩快报", "业绩修正", "预增", "预减", "预亏", "预盈"]
-        if any(kw in title for kw in performance_keywords):
-            if "半年" in title or "中期" in title:
-                return "半年报业绩预告"
-            if "第一季" in title or "一季" in title:
-                return "一季报业绩预告"
-            if "第三季" in title or "三季" in title:
-                return "三季报业绩预告"
-            return "年报业绩预告"
-        if "半年" in title or "中期" in title:
-            return "半年报"
-        if "第一季" in title or "一季" in title:
-            return "一季报"
-        if "第三季" in title or "三季" in title:
-            return "三季报"
-        if "年度报告" in title or "年报" in title:
-            return "年报"
-        # 严格模式：不允许未知类型
-        raise ValueError(f"无法识别报告期类型，标题: {title}")
 
     def _validate_report_year(self, report_year: int, pub_date: str, title: str) -> None:
         """校验报告期年份与公告日期的逻辑一致性。严格抛出异常。"""
@@ -366,7 +342,6 @@ class ReportCrawler:
             "title": title,
             "report_year": str(report_year) if report_year is not None else "未知",
             "announcement_date": announcement_date,
-            "period_type": self._identify_period_type(title),
             "report_type": self._identify_report_type(title),
             "is_correction": is_correction,
             "announcement_id": str(announcement_id),
