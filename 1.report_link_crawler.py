@@ -259,16 +259,22 @@ class ReportCrawler:
         dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=tz_shanghai)
         return dt.strftime("%Y-%m-%d")
 
+    # 修订类关键词（统一定义，避免多处维护）
+    CORRECTION_KEYWORDS = ["更正", "修订", "修正", "补充", "更新"]
+
     def _identify_report_type(self, title: str) -> str:
         if "摘要" in title:
             return "摘要"
-        if any(kw in title for kw in ["更正", "修订", "补充", "更新"]):
+        if any(kw in title for kw in self.CORRECTION_KEYWORDS):
             return "修订"
         return "正式"
 
     def _identify_period_type(self, title: str) -> str:
-        # 业绩预告需要优先判断，因为可能包含"年度"等关键词
-        if "业绩预告" in title:
+        # 业绩类公告优先判断（可能包含"年度"等关键词）
+        # 业绩预告/预增/预减/预亏/预盈/业绩快报
+        performance_keywords = ["业绩预告", "业绩预增", "业绩预减", "业绩预亏", "业绩预盈", 
+                                "业绩快报", "业绩修正", "预增", "预减", "预亏", "预盈"]
+        if any(kw in title for kw in performance_keywords):
             if "半年" in title or "中期" in title:
                 return "半年报业绩预告"
             if "第一季" in title or "一季" in title:
@@ -284,7 +290,8 @@ class ReportCrawler:
             return "三季报"
         if "年度报告" in title or "年报" in title:
             return "年报"
-        return "未知"
+        # 严格模式：不允许未知类型
+        raise ValueError(f"无法识别报告期类型，标题: {title}")
 
     def _validate_report_year(self, report_year: int, pub_date: str, title: str) -> None:
         """校验报告期年份与公告日期的逻辑一致性。严格抛出异常。"""
@@ -349,8 +356,8 @@ class ReportCrawler:
         if announcement_id is None:
             raise RuntimeError(f"缺少announcementId字段，无法唯一标识公告: {title}")
 
-        # 识别是否为更正/修订版本
-        is_correction = 1 if any(w in title for w in ["更正", "修订", "补充", "更新"]) else 0
+        # 识别是否为更正/修订版本（使用统一的关键词列表）
+        is_correction = 1 if any(w in title for w in self.CORRECTION_KEYWORDS) else 0
 
         return {
             "company_code": item["secCode"],
