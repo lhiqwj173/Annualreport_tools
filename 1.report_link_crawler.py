@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 import re
 import time
@@ -19,12 +20,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-import openpyxl
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("crawler.log", encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
 
 
@@ -37,12 +43,13 @@ class CrawlerConfig:
     category: str = "category_ndbg_szsh"  # 报告类型
     trade: str = ""  # 行业过滤
     plate: str = "sz;sh"  # 板块控制（不含北交所bj）
-    max_retries: int = 3  # 最大重试次数
+    max_retries: int = 5  # 最大重试次数
     retry_delay: int = 5  # 重试延迟（秒）
-    timeout: int = 10  # 请求超时（秒）
+    timeout: int = 15  # 请求超时（秒）
     output_dir: str = "."  # 输出目录
     save_interval: int = 500  # 增量保存间隔（条数）
     page_delay: float = 0.3  # 页面间延迟（秒）
+    progress_file: str = "crawler_progress.txt"  # 断点续爬进度文件
 
 
 class CNINFOClient:
@@ -57,7 +64,8 @@ class CNINFOClient:
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Host": "www.cninfo.com.cn",
         "Origin": "http://www.cninfo.com.cn",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "http://www.cninfo.com.cn/new/commonUrl/pageOfSearch/index",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
         "X-Requested-With": "XMLHttpRequest"
     }
 
@@ -65,6 +73,14 @@ class CNINFOClient:
         self.config = config
         self.session = requests.Session()
         self.session.headers.update(self.HEADERS)
+        # 配置重试策略
+        retries = Retry(
+            total=config.max_retries,
+            backoff_factor=1,
+            status_forcelist=[500, 502, 503, 504]
+        )
+        self.session.mount('http://', HTTPAdapter(max_retries=retries))
+        self.session.mount('https://', HTTPAdapter(max_retries=retries))
 
     def _build_request_data(self, page_num: int, date_range: str) -> Dict[str, Any]:
         return {
@@ -161,6 +177,12 @@ class DateRangeGenerator:
 class ReportCrawler:
     """定期报告爬虫主类。"""
 
+    CSV_HEADERS = [
+        "company_code", "company_name", "org_id", "title", "report_year",
+        "announcement_date", "period_type", "report_type", "is_correction",
+        "announcement_id", "url"
+    ]
+
     def __init__(self, config: CrawlerConfig) -> None:
         self.config = config
         self.client = CNINFOClient(config)
@@ -195,7 +217,17 @@ class ReportCrawler:
             return "年报"
         return "未知"
 
-    def _parse_announcement(self, item: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    def _validate_report_year(self, report_year: int, pub_date: str, title: str) -> None:
+        """校验报告期年份与公告日期的逻辑一致性。严格抛出异常。"""
+        pub_year = int(pub_date[:4])
+        # 报告期年份不能晚于公告年份
+        if report_year > pub_year:
+            raise ValueError(
+                f"报告期校验失败: 报告期年份({report_year})晚于公告年份({pub_year})。"
+                f"公告日期: {pub_date}, 标题: {title}"
+            )
+
+    def _parse_announcement(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """解析单条公告数据。"""
         try:
             title = self._clean_title(item["announcementTitle"])
@@ -214,42 +246,60 @@ class ReportCrawler:
             if not year_match:
                 logging.debug(f"标题中无年份信息，跳过: {title}")
                 return None
-            report_year = year_match.group(1)
+            report_year = int(year_match.group(1))
+
+            # 报告期逻辑校验
+            self._validate_report_year(report_year, announcement_date, title)
+
+            # 识别是否为更正/修订版本
+            is_correction = 1 if any(w in title for w in ["更正", "修订", "补充", "更新"]) else 0
 
             return {
                 "company_code": item["secCode"],
                 "company_name": item["secName"],
+                "org_id": item.get("orgId", ""),  # 巨潮唯一ID，比股票代码更稳定
                 "title": title,
-                "report_year": report_year,
+                "report_year": str(report_year),
                 "announcement_date": announcement_date,
                 "period_type": self._identify_period_type(title),
                 "report_type": self._identify_report_type(title),
+                "is_correction": is_correction,
                 "announcement_id": str(item.get("announcementId", "")),
                 "url": f"http://static.cninfo.com.cn/{item['adjunctUrl']}"
             }
         except KeyError as e:
             raise RuntimeError(f"解析公告数据失败，缺少必要字段: {e}")
 
-    def _save_to_excel(self, data: List[Dict[str, str]], output_path: str) -> None:
-        """保存数据到Excel。"""
-        workbook = openpyxl.Workbook()
-        ws = workbook.active
-        ws.title = "定期报告"
+    def _init_csv(self, output_path: Path) -> None:
+        """初始化CSV文件（写入表头）。"""
+        if not output_path.exists():
+            with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=self.CSV_HEADERS)
+                writer.writeheader()
 
-        ws.append([
-            "公司代码", "公司简称", "标题", "报告期年份",
-            "公告日期", "报告期类型", "报告类型", "公告ID", "下载链接"
-        ])
+    def _append_to_csv(self, data: List[Dict[str, Any]], output_path: Path) -> None:
+        """追加数据到CSV文件。"""
+        with open(output_path, 'a', newline='', encoding='utf-8-sig') as f:
+            writer = csv.DictWriter(f, fieldnames=self.CSV_HEADERS)
+            writer.writerows(data)
 
-        for item in data:
-            ws.append([
-                item["company_code"], item["company_name"], item["title"],
-                item["report_year"], item["announcement_date"], item["period_type"],
-                item["report_type"], item["announcement_id"], item["url"]
-            ])
+    def _get_progress_path(self) -> Path:
+        """获取进度文件路径。"""
+        return Path(self.config.output_dir) / self.config.progress_file
 
-        workbook.save(output_path)
-        logging.info(f"Excel保存成功: {output_path}")
+    def _load_completed_dates(self) -> set:
+        """加载已完成的日期集合。"""
+        progress_path = self._get_progress_path()
+        if not progress_path.exists():
+            return set()
+        with open(progress_path, 'r', encoding='utf-8') as f:
+            return set(line.strip() for line in f if line.strip())
+
+    def _save_completed_date(self, date_range: str) -> None:
+        """保存已完成的日期到进度文件。"""
+        progress_path = self._get_progress_path()
+        with open(progress_path, 'a', encoding='utf-8') as f:
+            f.write(f"{date_range}\n")
 
     def run(self) -> None:
         """执行爬取任务。"""
@@ -260,48 +310,70 @@ class ReportCrawler:
         logging.info(f"板块: {self.config.plate}")
         logging.info(f"排除关键词: {', '.join(self.config.exclude_keywords)}")
         logging.info("【量化提示】使用公告日期(announcement_date)避免前视偏差")
+        logging.info("【量化提示】org_id为巨潮唯一ID，比股票代码更稳定")
         logging.info("=" * 60)
 
-        date_ranges = DateRangeGenerator.generate_daily_ranges(
+        all_date_ranges = DateRangeGenerator.generate_daily_ranges(
             self.config.start_date, self.config.end_date
         )
-        logging.info(f"共 {len(date_ranges)} 个日期需要爬取")
 
-        output_filename = f"定期报告链接_{self.config.start_date}_{self.config.end_date}.xlsx"
+        # 断点续爬：加载已完成的日期，过滤掉
+        completed_dates = self._load_completed_dates()
+        if completed_dates:
+            logging.info(f"检测到进度文件，已完成 {len(completed_dates)} 个日期")
+        date_ranges = [d for d in all_date_ranges if d not in completed_dates]
+        logging.info(f"共 {len(all_date_ranges)} 个日期，待爬取 {len(date_ranges)} 个")
+
+        if not date_ranges:
+            logging.info("所有日期已爬取完成，无需继续")
+            return
+
+        output_filename = f"定期报告链接_{self.config.start_date}_{self.config.end_date}.csv"
         output_path = Path(self.config.output_dir) / output_filename
 
-        parsed_data = []
+        # 初始化CSV文件
+        self._init_csv(output_path)
+
+        # 运行模式判断
+        is_resume = len(completed_dates) > 0
+        if is_resume:
+            logging.info("【增量模式】从上次中断位置继续爬取")
+        else:
+            logging.info("【全量模式】首次运行，从头开始爬取")
+
+        total_saved = 0
         total_raw = 0
         filtered = 0
-        last_save_count = 0
 
         for idx, date_range in enumerate(date_ranges, 1):
             logging.info(f"[{idx}/{len(date_ranges)}] 正在爬取: {date_range}")
             results = self.client.fetch_all_pages(date_range)
             total_raw += len(results)
 
+            daily_parsed = []
             for item in results:
                 parsed = self._parse_announcement(item)
                 if parsed:
-                    parsed_data.append(parsed)
+                    daily_parsed.append(parsed)
                 else:
                     filtered += 1
 
-            # 增量保存
-            if len(parsed_data) - last_save_count >= self.config.save_interval:
-                self._save_to_excel(parsed_data, str(output_path))
-                last_save_count = len(parsed_data)
-                logging.info(f"增量保存: {len(parsed_data)} 条")
+            # 关键：先写入CSV，再记录进度，确保数据不丢失
+            if daily_parsed:
+                self._append_to_csv(daily_parsed, output_path)
+                total_saved += len(daily_parsed)
+                logging.info(f"已保存 {len(daily_parsed)} 条，累计: {total_saved} 条")
+
+            # 数据已持久化后，才记录进度
+            self._save_completed_date(date_range)
 
             if idx < len(date_ranges):
                 time.sleep(0.5)
 
-        if parsed_data:
-            self._save_to_excel(parsed_data, str(output_path))
-
         logging.info("=" * 60)
-        logging.info(f"爬取完成: 原始{total_raw}条, 过滤{filtered}条, 有效{len(parsed_data)}条")
+        logging.info(f"爬取完成: 原始{total_raw}条, 过滤{filtered}条, 有效{total_saved}条")
         logging.info(f"保存路径: {output_path}")
+        logging.info(f"进度文件: {self._get_progress_path()}")
         logging.info("=" * 60)
 
 
@@ -328,12 +400,13 @@ if __name__ == '__main__':
     TRADE = ""
 
     # 爬虫参数
-    MAX_RETRIES = 3
+    MAX_RETRIES = 5
     RETRY_DELAY = 5
-    TIMEOUT = 10
+    TIMEOUT = 15
     OUTPUT_DIR = "."
     SAVE_INTERVAL = 500
     PAGE_DELAY = 0.3
+    PROGRESS_FILE = "crawler_progress.txt"  # 断点续爬进度文件
 
     # ==================== 执行 ====================
 
@@ -349,7 +422,8 @@ if __name__ == '__main__':
         timeout=TIMEOUT,
         output_dir=OUTPUT_DIR,
         save_interval=SAVE_INTERVAL,
-        page_delay=PAGE_DELAY
+        page_delay=PAGE_DELAY,
+        progress_file=PROGRESS_FILE
     )
 
     crawler = ReportCrawler(config)
