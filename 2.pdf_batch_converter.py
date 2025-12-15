@@ -18,6 +18,7 @@ from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Optional, Tuple
 
+from tqdm import tqdm
 import pandas as pd
 import pdfplumber
 import requests
@@ -50,11 +51,10 @@ logging.basicConfig(
 @dataclass(frozen=True)
 class ConverterConfig:
     """PDF批量下载转换配置类。"""
-    excel_file: str  # Excel表格路径
+    excel_file: str  # 数据文件路径（支持Excel和CSV）
     pdf_dir: str  # PDF存储目录
     txt_dir: str  # TXT存储目录
     target_year: int  # 目标年份
-    delete_pdf: bool = False  # 是否删除转换后的PDF
     max_retries: int = 3  # 下载最大重试次数
     timeout: int = 15  # 请求超时时间（秒）
     chunk_size: int = 8192  # 下载块大小
@@ -79,6 +79,16 @@ class PDFDownloader:
         self.chunk_size = chunk_size
         self.session = requests.Session()
         self.session.headers.update(self.HEADERS)
+    
+    def close(self) -> None:
+        """关闭Session释放资源。"""
+        self.session.close()
+    
+    def __enter__(self) -> 'PDFDownloader':
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
     
     def download(self, pdf_url: str, pdf_file_path: str) -> bool:
         """下载PDF文件并验证完整性。
@@ -246,29 +256,49 @@ class PDFConverter:
         """
         # 方法1: pdfplumber
         if self._convert_with_pdfplumber(pdf_path, txt_path):
-            logging.info(f"转换成功 (pdfplumber): {txt_path}")
-            return True
+            if self._verify_txt_output(txt_path):
+                logging.info(f"转换成功 (pdfplumber): {txt_path}")
+                return True
         
         logging.warning(f"pdfplumber转换失败，尝试备用方案: {pdf_path}")
         
         # 方法2: PyPDF2
         if self._convert_with_pypdf2(pdf_path, txt_path):
-            logging.info(f"转换成功 (PyPDF2): {txt_path}")
-            return True
+            if self._verify_txt_output(txt_path):
+                logging.info(f"转换成功 (PyPDF2): {txt_path}")
+                return True
         
         # 方法3: pdfminer.six
         if self._convert_with_pdfminer(pdf_path, txt_path):
-            logging.info(f"转换成功 (pdfminer): {txt_path}")
-            return True
+            if self._verify_txt_output(txt_path):
+                logging.info(f"转换成功 (pdfminer): {txt_path}")
+                return True
         
         logging.error(f"所有PDF转换方法均失败: {pdf_path}")
         return False
+    
+    @staticmethod
+    def _verify_txt_output(txt_path: str) -> bool:
+        """验证转换后的TXT文件是否有效。"""
+        if not os.path.exists(txt_path):
+            return False
+        
+        if os.path.getsize(txt_path) == 0:
+            logging.warning(f"转换后TXT文件为空: {txt_path}")
+            try:
+                os.remove(txt_path)
+            except OSError:
+                pass
+            return False
+        
+        return True
     
     def process_single_file(
         self,
         code: int,
         name: str,
-        year: int,
+        title: str,
+        announcement_time: str,
         pdf_url: str
     ) -> bool:
         """处理单个文件的下载和转换。
@@ -276,56 +306,70 @@ class PDFConverter:
         Args:
             code: 公司代码
             name: 公司简称
-            year: 年份
+            title: 公告标题
+            announcement_time: 发布时间
             pdf_url: PDF下载链接
             
         Returns:
             处理是否成功
         """
-        # 生成文件名
-        base_name = self._sanitize_filename(f"{code:06}_{name}_{year}")
+        # 生成文件名: {发布时间}_{标题}_{code}_{公司名称}
+        # 发布时间格式化为 YYYYMMDD_HHMMSS
+        datetime_str = str(announcement_time)[:19].replace('-', '').replace(':', '').replace(' ', '_')
+        base_name = self._sanitize_filename(f"{datetime_str}_{title}_{code:06}_{name}")
         pdf_file_path = os.path.join(self.config.pdf_dir, f"{base_name}.pdf")
         txt_file_path = os.path.join(self.config.txt_dir, f"{base_name}.txt")
         
         try:
-            # 检查TXT是否已存在
-            if os.path.exists(txt_file_path):
-                logging.info(f"文件已存在，跳过: {base_name}.txt")
+            # 检查TXT是否已存在（断点续传：跳过已完成的文件）
+            if os.path.exists(txt_file_path) and os.path.getsize(txt_file_path) > 0:
+                logging.info(f"TXT已存在，跳过: {base_name}.txt")
                 return True
             
-            # 下载PDF（如果不存在）
-            if not os.path.exists(pdf_file_path):
+            # 检查PDF是否已存在且有效（断点续传：跳过已下载的文件）
+            pdf_exists_and_valid = (
+                os.path.exists(pdf_file_path) and 
+                os.path.getsize(pdf_file_path) > 0 and
+                PDFDownloader._verify_pdf(pdf_file_path)
+            )
+            
+            if not pdf_exists_and_valid:
+                # 删除可能损坏的PDF文件
+                if os.path.exists(pdf_file_path):
+                    try:
+                        os.remove(pdf_file_path)
+                        logging.warning(f"删除损坏的PDF: {pdf_file_path}")
+                    except OSError:
+                        pass
+                
+                # 下载PDF
                 if not self._download_with_retry(pdf_url, pdf_file_path):
                     return False
+            else:
+                logging.info(f"PDF已存在，跳过下载: {base_name}.pdf")
             
             # 转换PDF为TXT
             if not self._convert_pdf_to_txt(pdf_file_path, txt_file_path):
                 return False
             
-            # 删除PDF（如果配置要求）
-            if self.config.delete_pdf and os.path.exists(pdf_file_path):
-                try:
-                    os.remove(pdf_file_path)
-                    logging.info(f"已删除PDF: {pdf_file_path}")
-                except OSError as e:
-                    logging.warning(f"删除PDF失败: {e}")
-            
             return True
             
         except Exception as e:
-            logging.error(f"处理文件失败 {code:06}_{name}_{year}: {e}")
+            logging.error(f"处理文件失败 {code:06}_{name}: {e}")
             return False
+        finally:
+            # 确保关闭downloader的session
+            self.downloader.close()
 
 
-
-def _process_task(args: Tuple) -> bool:
+def _process_task(args: Tuple[ConverterConfig, int, str, str, str, str]) -> bool:
     """多进程任务包装函数。
     
     每个进程创建独立的PDFConverter实例，避免requests.Session跨进程共享问题。
     """
-    config, code, name, year, pdf_url = args
+    config, code, name, title, announcement_time, pdf_url = args
     converter = PDFConverter(config)
-    return converter.process_single_file(code, name, year, pdf_url)
+    return converter.process_single_file(code, name, title, announcement_time, pdf_url)
 
 
 class AnnualReportProcessor:
@@ -335,18 +379,25 @@ class AnnualReportProcessor:
         self.config = config
         self.converter = PDFConverter(config)
     
-    def _load_excel_data(self) -> Optional[pd.DataFrame]:
-        """加载Excel数据。"""
+    def _load_data(self) -> Optional[pd.DataFrame]:
+        """加载数据文件（支持Excel和CSV）。"""
+        file_path = self.config.excel_file
         try:
-            df = pd.read_excel(self.config.excel_file)
-            logging.info(f"成功加载Excel文件: {self.config.excel_file}")
+            if file_path.endswith('.csv'):
+                df = pd.read_csv(file_path)
+            else:
+                df = pd.read_excel(file_path)
+            logging.info(f"成功加载数据文件: {file_path}")
             return df
         except FileNotFoundError:
-            logging.error(f"Excel文件不存在: {self.config.excel_file}")
-            return None
-        except Exception as e:
-            logging.error(f"读取Excel失败: {e}")
-            return None
+            logging.error(f"数据文件不存在: {file_path}")
+            raise
+        except pd.errors.EmptyDataError:
+            logging.error(f"数据文件为空: {file_path}")
+            raise
+        except pd.errors.ParserError as e:
+            logging.error(f"数据文件解析失败: {e}")
+            raise
     
     def _prepare_directories(self) -> bool:
         """创建必要的目录。"""
@@ -361,16 +412,16 @@ class AnnualReportProcessor:
     
     def _filter_data_by_year(self, df: pd.DataFrame) -> pd.DataFrame:
         """按年份过滤数据。"""
-        required_columns = ['公司代码', '公司简称', '年份', '年报链接']
+        required_columns = ['company_code', 'company_name', 'title', 'announcement_time', 'url']
         
         # 检查必需列
         missing_cols = [col for col in required_columns if col not in df.columns]
         if missing_cols:
-            logging.error(f"Excel缺少必需列: {missing_cols}")
-            return pd.DataFrame()
+            raise ValueError(f"数据文件缺少必需列: {missing_cols}")
         
-        # 过滤年份
-        filtered = df[df['年份'].astype(str) == str(self.config.target_year)]
+        # 提取年份并过滤
+        df['year'] = pd.to_datetime(df['announcement_time']).dt.year
+        filtered = df[df['year'] == self.config.target_year]
         logging.info(f"找到 {len(filtered)} 条 {self.config.target_year} 年的记录")
         return filtered
     
@@ -379,17 +430,15 @@ class AnnualReportProcessor:
         logging.info("="*60)
         logging.info("年报批量下载转换程序启动")
         logging.info(f"目标年份: {self.config.target_year}")
-        logging.info(f"删除PDF: {self.config.delete_pdf}")
+        logging.info("支持断点续传：已存在的PDF和TXT文件将被跳过")
         logging.info("="*60)
         
         # 加载数据
-        df = self._load_excel_data()
-        if df is None:
-            return
+        df = self._load_data()
         
         # 准备目录
         if not self._prepare_directories():
-            return
+            raise RuntimeError("创建目录失败")
         
         # 过滤数据
         filtered_df = self._filter_data_by_year(df)
@@ -399,7 +448,8 @@ class AnnualReportProcessor:
         
         # 准备任务列表（传递config而非converter实例，避免Session跨进程共享）
         tasks = [
-            (self.config, row['公司代码'], row['公司简称'], row['年份'], row['年报链接'])
+            (self.config, row['company_code'], row['company_name'], 
+             row['title'], row['announcement_time'], row['url'])
             for _, row in filtered_df.iterrows()
         ]
         
@@ -409,7 +459,11 @@ class AnnualReportProcessor:
         
         success_count = 0
         with Pool(processes=worker_count) as pool:
-            results = pool.map(_process_task, tasks)
+            results = list(tqdm(
+                pool.imap(_process_task, tasks),
+                total=len(tasks),
+                desc=f"{self.config.target_year}年处理进度"
+            ))
             success_count = sum(results)
         
         # 输出统计
@@ -421,12 +475,8 @@ class AnnualReportProcessor:
 if __name__ == '__main__':
     # ==================== 配置区域 ====================
     
-    # Excel表格路径（建议使用绝对路径）
-    # 2024年02月14日更新后，此处只需要填写总表的路径，请于网盘或github中获取总表
-    EXCEL_FILE = "年报链接_2024【公众号：凌小添】.xlsx"
-    
-    # 是否删除转换后的PDF文件（节省磁盘空间）
-    DELETE_PDF = False
+    # 数据文件路径（支持Excel和CSV格式）
+    DATA_FILE = "财报公告链接.csv"
     
     # 是否批量处理多个年份
     BATCH_MODE = True
@@ -449,11 +499,10 @@ if __name__ == '__main__':
         # 批量处理多个年份
         for year in range(START_YEAR, END_YEAR + 1):
             config = ConverterConfig(
-                excel_file=EXCEL_FILE,
+                excel_file=DATA_FILE,
                 pdf_dir=f'年报文件/{year}/pdf年报',
                 txt_dir=f'年报文件/{year}/txt年报',
                 target_year=year,
-                delete_pdf=DELETE_PDF,
                 max_retries=MAX_RETRIES,
                 timeout=TIMEOUT,
                 processes=PROCESSES
@@ -466,11 +515,10 @@ if __name__ == '__main__':
     else:
         # 处理单独年份
         config = ConverterConfig(
-            excel_file=EXCEL_FILE,
+            excel_file=DATA_FILE,
             pdf_dir=f'年报文件/{SINGLE_YEAR}/pdf年报',
             txt_dir=f'年报文件/{SINGLE_YEAR}/txt年报',
             target_year=SINGLE_YEAR,
-            delete_pdf=DELETE_PDF,
             max_retries=MAX_RETRIES,
             timeout=TIMEOUT,
             processes=PROCESSES
