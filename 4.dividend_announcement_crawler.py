@@ -326,6 +326,7 @@ class DividendCrawler:
         "category_qyfpxzcs_szsh": "权益分派",
         "category_pg_szsh": "配股",
         "category_fh_jjgg": "基金分红",
+        "category_qt_jjgg": "基金其他",
     }
 
     def __init__(self, config: CrawlerConfig) -> None:
@@ -529,7 +530,8 @@ if __name__ == '__main__':
     # - category_qyfpxzcs_szsh: 权益分派（股票分红、送股、转增股本等）
     # - category_pg_szsh: 配股
     # - category_fh_jjgg: 基金分红
-    CATEGORY = "category_qyfpxzcs_szsh;category_pg_szsh;category_fh_jjgg"
+    # - category_qt_jjgg: 基金其他（含基金份额拆分等）
+    CATEGORY = "category_qyfpxzcs_szsh;category_pg_szsh;category_fh_jjgg;category_qt_jjgg"
 
     # 爬虫参数
     MAX_RETRIES = 5
