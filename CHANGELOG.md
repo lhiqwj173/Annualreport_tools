@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Critical: API Data Inconsistency** - Fixed crawler failure due to API backend multi-node data inconsistency
+  - API's `totalAnnouncement` field fluctuates between requests (e.g., 1315 vs 1322)
+  - Single crawl pass may miss some records due to pagination boundary shifts
+  - Solution: Multi-pass crawling with deduplication until unique count equals max(totalAnnouncement)
+  - Strict validation: unique count must equal max(totalAnnouncement), throws AssertionError otherwise
+  - Max 10 retry attempts before failing
+
 ### Added
 - **Performance Forecast Support** - Added `category_yjygjxz_szsh` to crawl performance forecasts (业绩预告)
   - Extended `_identify_period_type` to classify forecast types (年报业绩预告/半年报业绩预告/一季报业绩预告/三季报业绩预告)

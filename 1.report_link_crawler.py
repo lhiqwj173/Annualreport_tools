@@ -140,13 +140,176 @@ class CNINFOClient:
 
     # API单次查询最大返回条数限制
     API_MAX_RESULTS = 3000
+    # 多次爬取合并的最大尝试次数
+    MAX_MERGE_ATTEMPTS = 10
+
+    def _fetch_single_pass(
+        self, date_range: str, plate: str, seen_ids: set, data_by_id: Dict[str, Dict[str, Any]],
+        check_split: bool = False
+    ) -> int:
+        """
+        单次遍历所有页面，收集数据并去重合并。
+        
+        Args:
+            date_range: 日期范围
+            plate: 板块
+            seen_ids: 已收集的ID集合（会被更新）
+            data_by_id: ID到数据的映射（会被更新）
+            check_split: 是否检查需要分板块查询
+        
+        Returns:
+            本次遍历中遇到的最大 totalAnnouncement
+            返回 -1 表示需要分板块查询
+        """
+        page_num = 1
+        max_total = 0
+        local_seen_this_pass: set = set()  # 本次遍历中已见的ID，用于检测全页重复
+
+        while True:
+            page_data = self.fetch_page(page_num, date_range, plate)
+            
+            # 获取并更新 max_total
+            total = page_data.get("totalAnnouncement", 0)
+            if isinstance(total, int) and total > max_total:
+                max_total = total
+
+            if page_num == 1:
+                if "totalAnnouncement" not in page_data:
+                    raise RuntimeError(
+                        f"API响应缺少totalAnnouncement字段: {date_range}。响应keys: {list(page_data.keys())}"
+                    )
+                if not isinstance(total, int):
+                    raise RuntimeError(
+                        f"totalAnnouncement类型异常，期望int，实际: {type(total).__name__}"
+                    )
+                if total == 0:
+                    return 0
+                # 首页检查是否需要分板块查询
+                if check_split and total > self.API_MAX_RESULTS:
+                    logging.info(
+                        f"日期 {date_range} 数据量({total})超过API限制({self.API_MAX_RESULTS})，启用分板块查询"
+                    )
+                    return -1  # 特殊标记：需要分板块查询
+
+            if "announcements" not in page_data:
+                raise RuntimeError(
+                    f"API响应缺少announcements字段: {date_range} 第{page_num}页"
+                )
+            
+            announcements = page_data["announcements"]
+            
+            # announcements为None或空列表表示无更多数据
+            if announcements is None:
+                break
+            if not isinstance(announcements, list):
+                raise RuntimeError(
+                    f"announcements类型异常，期望list，实际: {type(announcements).__name__}"
+                )
+            if len(announcements) == 0:
+                break
+
+            # 收集本页ID
+            current_page_ids = set()
+            for item in announcements:
+                ann_id = item.get("announcementId")
+                if ann_id is not None:
+                    current_page_ids.add(ann_id)
+                    # 合并新数据
+                    if ann_id not in seen_ids:
+                        seen_ids.add(ann_id)
+                        data_by_id[ann_id] = item
+
+            # 全页重复检测（本次遍历内）：防止API无限循环
+            if current_page_ids and current_page_ids.issubset(local_seen_this_pass):
+                logging.debug(f"{date_range} 第{page_num}页全部重复，终止本次遍历")
+                break
+            
+            local_seen_this_pass.update(current_page_ids)
+            
+            print(f"\r日期 {date_range} (plate={plate}): 第{page_num}页, 本次累计 {len(local_seen_this_pass)}, 总唯一 {len(seen_ids)}/{max_total}", end='', flush=True)
+
+            if "hasMore" not in page_data:
+                raise RuntimeError(
+                    f"API响应缺少hasMore字段: {date_range} 第{page_num}页"
+                )
+            
+            if not page_data["hasMore"]:
+                break
+
+            page_num += 1
+            time.sleep(self.config.page_delay)
+
+        return max_total
+
+    def _fetch_with_retry(self, date_range: str, plate: str, check_split: bool = False) -> List[Dict[str, Any]]:
+        """
+        多次爬取合并，直到唯一数量等于 max(totalAnnouncement)。
+        
+        Args:
+            date_range: 日期范围
+            plate: 板块
+            check_split: 是否检查需要分板块查询（首次尝试时检查）
+        
+        Returns:
+            去重后的完整数据列表
+        """
+        seen_ids: set = set()
+        data_by_id: Dict[str, Dict[str, Any]] = {}
+        max_total = 0
+
+        for attempt in range(1, self.MAX_MERGE_ATTEMPTS + 1):
+            # 仅首次尝试时检查是否需要分板块
+            current_max = self._fetch_single_pass(
+                date_range, plate, seen_ids, data_by_id,
+                check_split=(attempt == 1 and check_split)
+            )
+            
+            # 需要分板块查询
+            if current_max == -1:
+                return self._fetch_by_split_plates(date_range)
+            
+            max_total = max(max_total, current_max)
+            print()  # 换行
+            
+            # 无数据情况
+            if max_total == 0:
+                logging.info(f"日期 {date_range} (plate={plate}): 无公告数据")
+                return []
+            
+            unique_count = len(seen_ids)
+            
+            # 校验：唯一数量不应超过 max_total
+            if unique_count > max_total:
+                raise AssertionError(
+                    f"数据异常: {date_range} (plate={plate}) "
+                    f"唯一数量({unique_count})超过max(totalAnnouncement)({max_total})，不符合预期"
+                )
+            
+            # 成功：唯一数量等于 max_total
+            if unique_count == max_total:
+                if attempt > 1:
+                    logging.info(f"日期 {date_range} (plate={plate}): 第{attempt}次尝试后数据完整，共{unique_count}条")
+                return list(data_by_id.values())
+            
+            # 不完整：继续重试
+            logging.info(
+                f"日期 {date_range} (plate={plate}): 第{attempt}次尝试，"
+                f"唯一{unique_count}/{max_total}，差{max_total - unique_count}条，继续重试"
+            )
+            time.sleep(self.config.page_delay)
+
+        # 超过最大尝试次数
+        raise AssertionError(
+            f"数据完整性校验失败: {date_range} (plate={plate}) "
+            f"经过{self.MAX_MERGE_ATTEMPTS}次尝试，唯一数量({len(seen_ids)})仍小于max(totalAnnouncement)({max_total})，"
+            f"差{max_total - len(seen_ids)}条"
+        )
 
     def _fetch_by_split_plates(self, date_range: str) -> List[Dict[str, Any]]:
         """
         分板块查询数据，用于绕过API的3000条限制。
         将 "sz;sh" 拆分为单独的 "sz" 和 "sh" 分别查询。
         """
-        # 解析配置中的板块
         plates = [p.strip() for p in self.config.plate.split(";") if p.strip()]
         if len(plates) <= 1:
             raise RuntimeError(
@@ -159,139 +322,33 @@ class CNINFOClient:
         
         for plate in plates:
             logging.info(f"  分板块查询: {date_range} plate={plate}")
-            plate_results = self.fetch_all_pages(date_range, plate_override=plate)
+            plate_results = self._fetch_with_retry(date_range, plate)
             
-            # 去重（理论上不同板块不会重复，但保险起见）
+            # 去重合并（理论上不同板块不会重复，但保险起见）
             for item in plate_results:
                 ann_id = item.get("announcementId")
                 if ann_id not in seen_ids:
                     seen_ids.add(ann_id)
                     all_results.append(item)
             
-            logging.info(f"    获取 {len(plate_results)} 条，累计 {len(all_results)} 条")
-            time.sleep(self.config.page_delay)
+            logging.info(f"    板块 {plate} 获取 {len(plate_results)} 条，累计 {len(all_results)} 条")
         
         return all_results
 
     def fetch_all_pages(self, date_range: str, plate_override: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        获取指定日期范围的所有页面数据。
+        获取指定日期范围的所有页面数据（支持多次重试合并）。
         
         Args:
             date_range: 日期范围，格式 "YYYY-MM-DD~YYYY-MM-DD"
             plate_override: 可选，覆盖配置中的板块设置（用于分板块查询）
+        
+        Returns:
+            去重后的完整数据列表
         """
-        all_results = []
-        page_num = 1
-        expected_total: Optional[int] = None
-        seen_ids: set = set()  # 用于检测重复数据
         current_plate = plate_override if plate_override else self.config.plate
-
-        while True:
-            page_data = self.fetch_page(page_num, date_range, current_plate)
-
-            if page_num == 1:
-                # 严格校验首页响应结构
-                if "totalAnnouncement" not in page_data:
-                    raise RuntimeError(
-                        f"API响应缺少totalAnnouncement字段: {date_range}。响应keys: {list(page_data.keys())}"
-                    )
-                expected_total = page_data["totalAnnouncement"]
-                if not isinstance(expected_total, int):
-                    raise RuntimeError(
-                        f"totalAnnouncement类型异常，期望int，实际: {type(expected_total).__name__}"
-                    )
-                if expected_total == 0:
-                    logging.info(f"日期 {date_range} (plate={current_plate}): 无公告数据")
-                    return all_results
-                
-                # 检查是否超过API限制，需要分板块查询
-                if expected_total > self.API_MAX_RESULTS and plate_override is None:
-                    logging.info(
-                        f"日期 {date_range} 数据量({expected_total})超过API限制({self.API_MAX_RESULTS})，启用分板块查询"
-                    )
-                    return self._fetch_by_split_plates(date_range)
-
-            # 严格校验announcements字段
-            if "announcements" not in page_data:
-                raise RuntimeError(
-                    f"API响应缺少announcements字段: {date_range} 第{page_num}页"
-                )
-            
-            announcements = page_data["announcements"]
-            
-            # announcements为None表示该页无数据（正常结束）
-            if announcements is None:
-                if page_num == 1 and expected_total > 0:
-                    raise RuntimeError(
-                        f"数据异常: {date_range} 声称有{expected_total}条数据，但首页announcements为None"
-                    )
-                break
-            
-            if not isinstance(announcements, list):
-                raise RuntimeError(
-                    f"announcements类型异常，期望list，实际: {type(announcements).__name__}"
-                )
-
-            # 关键修复：如果返回空列表，说明已无更多数据，立即终止
-            if len(announcements) == 0:
-                logging.debug(f"日期 {date_range} 第{page_num}页返回空列表，终止翻页")
-                break
-
-            # 重复数据检测：API在超出实际页数后会循环返回第1页数据
-            current_page_ids = set()
-            for item in announcements:
-                ann_id = item.get("announcementId")
-                if ann_id is not None:
-                    current_page_ids.add(ann_id)
-            
-            # 严格检测：当前页数据是否全部重复（API分页循环bug）
-            if current_page_ids and current_page_ids.issubset(seen_ids):
-                raise AssertionError(
-                    f"API分页异常: {date_range} 第{page_num}页全部{len(current_page_ids)}条数据已存在。"
-                    f"API在超出实际数据量后循环返回第1页数据。"
-                    f"已获取{len(all_results)}条，API声称{expected_total}条。"
-                    f"请检查API限制或尝试分板块查询。"
-                )
-            
-            seen_ids.update(current_page_ids)
-            all_results.extend(announcements)
-            
-            # 严格检测：已获取数量超过API声称的总数
-            if expected_total is not None and len(all_results) > expected_total:
-                raise AssertionError(
-                    f"数据量异常: {date_range} 已获取{len(all_results)}条，超过API声称的{expected_total}条。"
-                    f"当前第{page_num}页。API可能存在数据不一致问题。"
-                )
-            
-            print(f"\r日期 {date_range}: 第{page_num}页, 已获取 {len(all_results)}/{expected_total} 条", end='', flush=True)
-
-            # 正常终止：达到API声称的总数
-            if expected_total is not None and len(all_results) == expected_total:
-                break
-
-            # 严格校验hasMore字段
-            if "hasMore" not in page_data:
-                raise RuntimeError(
-                    f"API响应缺少hasMore字段: {date_range} 第{page_num}页"
-                )
-            
-            if not page_data["hasMore"]:
-                break
-
-            page_num += 1
-            time.sleep(self.config.page_delay)
-
-        print()
-
-        # 严格数据完整性校验
-        if expected_total is not None and len(all_results) != expected_total:
-            raise AssertionError(
-                f"数据完整性校验失败: {date_range} (plate={current_plate}) "
-                f"API声称{expected_total}条, 实际获取{len(all_results)}条, 差异{len(all_results) - expected_total}条"
-            )
-
-        return all_results
+        
+        return self._fetch_with_retry(date_range, current_plate, check_split=(plate_override is None))
 
 
 class DateRangeGenerator:
