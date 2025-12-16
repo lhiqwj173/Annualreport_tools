@@ -69,8 +69,10 @@ class CNINFOClient:
 
     # API单次查询最大返回条数限制
     API_MAX_RESULTS = 3000
-    # 多次爬取合并的最大尝试次数
-    MAX_MERGE_ATTEMPTS = 10
+    # 收敛检测：连续无新增的次数阈值
+    CONVERGENCE_THRESHOLD = 3
+    # 最大尝试次数（防止无限循环）
+    MAX_MERGE_ATTEMPTS = 20
 
     def __init__(self, config: CrawlerConfig) -> None:
         self.config = config
@@ -217,10 +219,19 @@ class CNINFOClient:
         return max_total
 
     def _fetch_with_retry(self, date_range: str, plate: str, check_split: bool = False) -> List[Dict[str, Any]]:
-        """多次爬取合并，直到唯一数量等于 max(totalAnnouncement)。"""
+        """
+        多次爬取合并，使用收敛检测判断数据完整性。
+        
+        收敛检测：连续N次遍历无新增数据，则认为数据完整。
+        这比依赖 totalAnnouncement 更可靠，因为API的 totalAnnouncement 存在动态波动问题。
+        
+        问题复现日期: 2022-07-15 (totalAnnouncement=972, 实际可爬取974条)
+        """
         seen_ids: set = set()
         data_by_id: Dict[str, Dict[str, Any]] = {}
         max_total = 0
+        consecutive_no_new = 0  # 连续无新增的次数
+        prev_unique_count = 0
 
         for attempt in range(1, self.MAX_MERGE_ATTEMPTS + 1):
             current_max = self._fetch_single_pass(
@@ -234,33 +245,44 @@ class CNINFOClient:
             max_total = max(max_total, current_max)
             print()
             
-            if max_total == 0:
+            unique_count = len(seen_ids)
+            new_count = unique_count - prev_unique_count
+            prev_unique_count = unique_count
+            
+            # 无数据情况（首次尝试且无数据）
+            if attempt == 1 and current_max == 0:
                 logging.info(f"日期 {date_range} (plate={plate}): 无公告数据")
                 return []
             
-            unique_count = len(seen_ids)
+            # 收敛检测：检查是否有新增数据
+            if new_count == 0:
+                consecutive_no_new += 1
+            else:
+                consecutive_no_new = 0  # 重置
             
-            if unique_count > max_total:
-                raise AssertionError(
-                    f"数据异常: {date_range} (plate={plate}) "
-                    f"唯一数量({unique_count})超过max(totalAnnouncement)({max_total})，不符合预期"
-                )
-            
-            if unique_count == max_total:
-                if attempt > 1:
-                    logging.info(f"日期 {date_range} (plate={plate}): 第{attempt}次尝试后数据完整，共{unique_count}条")
+            # 收敛成功：连续N次无新增
+            if consecutive_no_new >= self.CONVERGENCE_THRESHOLD:
+                if attempt > self.CONVERGENCE_THRESHOLD:
+                    logging.info(
+                        f"日期 {date_range} (plate={plate}): 第{attempt}次尝试后收敛，"
+                        f"共{unique_count}条 (API报告: {max_total})"
+                    )
                 return list(data_by_id.values())
             
-            logging.info(
-                f"日期 {date_range} (plate={plate}): 第{attempt}次尝试，"
-                f"唯一{unique_count}/{max_total}，差{max_total - unique_count}条，继续重试"
-            )
+            # 记录进度（仅在有新增时）
+            if new_count > 0 and attempt > 1:
+                logging.debug(
+                    f"日期 {date_range} (plate={plate}): 第{attempt}次尝试，"
+                    f"新增{new_count}条，累计{unique_count}条"
+                )
+            
             time.sleep(self.config.page_delay)
 
-        raise AssertionError(
-            f"数据完整性校验失败: {date_range} (plate={plate}) "
-            f"经过{self.MAX_MERGE_ATTEMPTS}次尝试，唯一数量({len(seen_ids)})仍小于max(totalAnnouncement)({max_total})，"
-            f"差{max_total - len(seen_ids)}条"
+        # 超过最大尝试次数仍未收敛
+        raise RuntimeError(
+            f"数据收敛失败: {date_range} (plate={plate}) "
+            f"经过{self.MAX_MERGE_ATTEMPTS}次尝试仍有新数据，"
+            f"当前唯一数量: {len(seen_ids)}, API报告: {max_total}"
         )
 
     def _fetch_by_split_plates(self, date_range: str) -> List[Dict[str, Any]]:
