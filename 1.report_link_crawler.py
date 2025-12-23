@@ -587,7 +587,7 @@ if __name__ == '__main__':
     # 首次爬取：从2007-01-01开始（2007年财务报告改革）
     # 增量爬取：从上次爬取的结束日期开始
     START_DATE = "2007-01-01"
-    END_DATE = "2025-12-15"  # 爬取到今天或指定日期
+    END_DATE = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")  # 爬取到昨天
 
     # 排除关键词
     EXCLUDE_KEYWORDS = ['英文']

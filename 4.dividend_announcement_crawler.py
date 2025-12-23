@@ -540,7 +540,7 @@ if __name__ == '__main__':
     # 日期范围（公告发布日期）
     # 复权相关公告从1990年代就有，但主要从2000年后数据较完整
     START_DATE = "2000-01-01"
-    END_DATE = "2025-12-16"
+    END_DATE = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")  # 爬取到昨天
 
     # 排除关键词
     EXCLUDE_KEYWORDS = ['英文']
