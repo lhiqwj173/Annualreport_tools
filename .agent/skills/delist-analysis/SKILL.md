@@ -316,7 +316,17 @@ description: 分析退市股票的退市原因、首次通知日期和置换方�
 
 ## 工作流程
 
-### 步骤 1: 获取公告列表
+### 步骤 1: 筛选退市相关公告
+
+使用 `filter-delist` 命令快速筛选出与退市相关的公告：
+
+```bash
+$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py filter-delist <stock_code> --limit 300
+```
+
+这会自动筛选包含以下关键词的公告：吸收合并、换股、终止上市、摘牌、退市、停牌、预案、要约收购、主动退市等。
+
+如果需要查看完整公告列表：
 
 ```bash
 $env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py list-announcements <stock_code> --limit 100 --sort desc
@@ -381,10 +391,14 @@ $env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/d
 
 ### 步骤 5: 执行校验
 
-提取完成后，**必须执行完整校验**。使用以下命令：
+提取完成后，**必须执行完整校验**。先将数据保存为 JSON 文件，然后校验：
 
 ```bash
-$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py validate --data '<json>'
+# 保存数据到临时文件
+# 内容: {"code":"xxxxxx", "名称":"xxx", ...}
+
+# 校验数据
+$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py validate --file temp_data.json
 ```
 
 如果校验通过，继续保存。如果校验失败，**必须停止并报告用户**。
@@ -394,7 +408,7 @@ $env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/d
 只有校验通过后才能保存：
 
 ```bash
-$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py append-result --csv <output_file> --data '<json>'
+$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py append-result --csv <output_file> --file temp_data.json
 ```
 
 ---
@@ -411,13 +425,14 @@ $env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/d
   "退市日期": "2025-09-05",
   "退市原因": "被中国船舶换股吸收合并",
   "退市类型": "MERGE",
-  "首次退市通知日": "2025-08-05",
+  "首次退市通知日": "2024-09-19",
+  "停牌开始日": "2025-08-05",
   "置换标的code": "600150",
   "置换标的名称": "中国船舶",
   "置换比例": "1:0.1339",
   "置换完成日期": "2025-09-04",
-  "来源公告": "关于...换股实施的提示性公告",
-  "公告URL": "http://..."
+  "来源公告": "关于公司股票终止上市的公告",
+  "公告URL": "http://static.cninfo.com.cn/finalpage/2025-08-30/1224625027.PDF"
 }
 ```
 

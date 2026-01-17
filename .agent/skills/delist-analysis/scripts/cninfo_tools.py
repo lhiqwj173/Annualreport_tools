@@ -580,16 +580,25 @@ def main():
     # append-result
     app_parser = subparsers.add_parser("append-result", help="追加结果到CSV")
     app_parser.add_argument("--csv", "-c", required=True, help="CSV文件路径")
-    app_parser.add_argument("--data", "-d", required=True, help="JSON格式的数据")
+    app_group = app_parser.add_mutually_exclusive_group(required=True)
+    app_group.add_argument("--data", "-d", help="JSON格式的数据")
+    app_group.add_argument("--file", "-f", help="包含JSON数据的文件路径")
 
     # validate
     val_parser = subparsers.add_parser("validate", help="校验提取结果")
-    val_parser.add_argument("--data", "-d", required=True, help="JSON格式的数据")
+    val_group = val_parser.add_mutually_exclusive_group(required=True)
+    val_group.add_argument("--data", "-d", help="JSON格式的数据")
+    val_group.add_argument("--file", "-f", help="包含JSON数据的文件路径")
 
     # scan-risk
     scan_parser = subparsers.add_parser("scan-risk", help="扫描股票退市风险")
     scan_parser.add_argument("stock_code", help="股票代码")
     scan_parser.add_argument("--days", "-d", type=int, default=30, help="扫描最近N天的公告")
+
+    # filter-delist: 筛选退市相关公告
+    filter_parser = subparsers.add_parser("filter-delist", help="筛选退市相关公告")
+    filter_parser.add_argument("stock_code", help="股票代码")
+    filter_parser.add_argument("--limit", "-l", type=int, default=200, help="查询公告数量上限")
 
     args = parser.parse_args()
 
@@ -622,9 +631,16 @@ def main():
 
     elif args.command == "append-result":
         try:
-            data = json.loads(args.data)
+            if args.file:
+                with open(args.file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            else:
+                data = json.loads(args.data)
         except json.JSONDecodeError as e:
             print(f"Invalid JSON: {e}", file=sys.stderr)
+            sys.exit(1)
+        except FileNotFoundError:
+            print(f"File not found: {args.file}", file=sys.stderr)
             sys.exit(1)
 
         success = append_result_to_csv(args.csv, data)
@@ -635,9 +651,16 @@ def main():
 
     elif args.command == "validate":
         try:
-            data = json.loads(args.data)
+            if args.file:
+                with open(args.file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            else:
+                data = json.loads(args.data)
         except json.JSONDecodeError as e:
             print(f"Invalid JSON: {e}", file=sys.stderr)
+            sys.exit(1)
+        except FileNotFoundError:
+            print(f"File not found: {args.file}", file=sys.stderr)
             sys.exit(1)
 
         result = validate_result(data)
@@ -672,6 +695,42 @@ def main():
         # 如果有紧急或高风险，返回非0退出码
         if result["risk_level"] in ["CRITICAL", "HIGH"]:
             sys.exit(1)
+
+    elif args.command == "filter-delist":
+        # 筛选退市相关公告
+        client = CNINFOClient()
+        announcements = client.list_announcements(
+            args.stock_code,
+            keyword="",
+            sort="desc",
+            limit=args.limit
+        )
+        
+        # 退市相关关键词
+        delist_keywords = [
+            "吸收合并", "换股", "终止上市", "摘牌", "退市",
+            "停牌", "预案", "要约收购", "主动退市",
+            "触发退市", "退市整理", "股东大会.*决议"
+        ]
+        
+        import re
+        filtered = []
+        for ann in announcements:
+            title = ann.get("title", "")
+            for kw in delist_keywords:
+                if re.search(kw, title):
+                    ann["matched_keyword"] = kw
+                    filtered.append(ann)
+                    break
+        
+        # 输出结果
+        result = {
+            "stock_code": args.stock_code,
+            "total_announcements": len(announcements),
+            "filtered_count": len(filtered),
+            "announcements": filtered
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
 
     else:
         parser.print_help()
