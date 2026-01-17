@@ -318,14 +318,23 @@ def validate_result(data: Dict[str, Any]) -> Dict[str, Any]:
                 "message": f"必填字段 '{field}' 缺失或为空"
             })
     
-    # 2. 检查 code 格式
+    # 2. 检查 code 格式 (增强版：必须是6位数字字符串)
     code = data.get("code", "")
     if code and code != "NaN":
-        if not (len(code) == 6 and code.isdigit()):
+        # 检查类型必须是字符串
+        if not isinstance(code, str):
             errors.append({
                 "type": "INVALID_FORMAT",
                 "field": "code",
-                "message": f"股票代码格式错误: '{code}'，应为6位数字"
+                "message": f"股票代码必须是字符串类型，当前为 {type(code).__name__}: {code}。"
+                           f"请使用引号包裹，如 \"000001\" 而非 1"
+            })
+        # 检查长度和格式
+        elif not (len(code) == 6 and code.isdigit()):
+            errors.append({
+                "type": "INVALID_FORMAT",
+                "field": "code",
+                "message": f"股票代码格式错误: '{code}'，应为6位数字字符串（如 '000001'）"
             })
     
     # 3. 检查日期格式
@@ -427,10 +436,16 @@ def validate_result(data: Dict[str, Any]) -> Dict[str, Any]:
                     "message": f"置换比例格式错误: '{ratio}'，应为 '1:X.XXXX' 格式"
                 })
         
-        # 检查置换标的code格式
+        # 检查置换标的code格式 (增强版)
         target_code = data.get("置换标的code", "")
         if target_code and target_code != "NaN":
-            if not (len(target_code) == 6 and target_code.isdigit()):
+            if not isinstance(target_code, str):
+                errors.append({
+                    "type": "INVALID_FORMAT",
+                    "field": "置换标的code",
+                    "message": f"置换标的code必须是字符串类型，当前为 {type(target_code).__name__}: {target_code}"
+                })
+            elif not (len(target_code) == 6 and target_code.isdigit()):
                 errors.append({
                     "type": "INVALID_FORMAT",
                     "field": "置换标的code",
