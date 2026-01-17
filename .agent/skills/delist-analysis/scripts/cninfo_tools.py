@@ -643,7 +643,14 @@ def main():
             print(f"File not found: {args.file}", file=sys.stderr)
             sys.exit(1)
 
-        success = append_result_to_csv(args.csv, data)
+        if isinstance(data, list):
+            success = True
+            for item in data:
+                if not append_result_to_csv(args.csv, item):
+                    success = False
+        else:
+            success = append_result_to_csv(args.csv, data)
+            
         if success:
             print(json.dumps({"success": True}))
         else:
@@ -663,11 +670,22 @@ def main():
             print(f"File not found: {args.file}", file=sys.stderr)
             sys.exit(1)
 
-        result = validate_result(data)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        
-        if not result["valid"]:
-            sys.exit(1)
+        if isinstance(data, list):
+            results = []
+            all_valid = True
+            for item in data:
+                res = validate_result(item)
+                results.append(res)
+                if not res["valid"]:
+                    all_valid = False
+            print(json.dumps(results, ensure_ascii=False, indent=2))
+            if not all_valid:
+                sys.exit(1)
+        else:
+            result = validate_result(data)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            if not result["valid"]:
+                sys.exit(1)
 
     elif args.command == "scan-risk":
         client = CNINFOClient()
