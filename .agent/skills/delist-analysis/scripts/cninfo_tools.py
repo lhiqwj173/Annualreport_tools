@@ -96,7 +96,8 @@ class CNINFOClient:
         stock_code: str,
         keyword: str = "",
         sort: str = "desc",
-        limit: int = 30
+        limit: int = 30,
+        date_range: str = ""  # 新增：日期范围 "YYYY-MM-DD~YYYY-MM-DD"
     ) -> List[Dict[str, Any]]:
         """
         获取股票公告列表
@@ -106,6 +107,7 @@ class CNINFOClient:
             keyword: 搜索关键词（可选）
             sort: 排序方式 asc/desc
             limit: 返回数量限制
+            date_range: 日期范围（可选），格式 "YYYY-MM-DD~YYYY-MM-DD"
             
         Returns:
             公告列表 [{date, title, id, url}, ...]
@@ -124,7 +126,7 @@ class CNINFOClient:
                 "stock": f"{stock_code},{org_id}",
                 "searchkey": keyword,
                 "category": "",
-                "seDate": "",
+                "seDate": date_range,  # 使用传入的日期范围
                 "sortName": "time",
                 "sortType": sort,
                 "isHLtitle": "false"
@@ -591,6 +593,8 @@ def main():
     filter_parser = subparsers.add_parser("filter-delist", help="筛选退市相关公告")
     filter_parser.add_argument("stock_code", help="股票代码")
     filter_parser.add_argument("--limit", "-l", type=int, default=200, help="查询公告数量上限")
+    filter_parser.add_argument("--before-date", "-b", help="搜索此日期之前的公告 (YYYY-MM-DD)，通常设为退市日期")
+    filter_parser.add_argument("--after-date", "-a", help="搜索此日期之后的公告 (YYYY-MM-DD)")
 
     args = parser.parse_args()
 
@@ -709,11 +713,41 @@ def main():
     elif args.command == "filter-delist":
         # 筛选退市相关公告
         client = CNINFOClient()
+        
+        # 构造日期范围
+        date_range = ""
+        if args.before_date and args.after_date:
+            # 同时指定了开始和结束日期
+            date_range = f"{args.after_date}~{args.before_date}"
+        elif args.before_date:
+            # 只指定了截止日期，向前搜索18个月（退市通知通常在退市前6-18个月）
+            from datetime import datetime, timedelta
+            try:
+                before_dt = datetime.strptime(args.before_date, "%Y-%m-%d")
+                # 向前推 18 个月（约 540 天）
+                after_dt = before_dt - timedelta(days=540)
+                date_range = f"{after_dt.strftime('%Y-%m-%d')}~{args.before_date}"
+            except ValueError:
+                print(f"日期格式错误: {args.before_date}，应为 YYYY-MM-DD", file=sys.stderr)
+                sys.exit(1)
+        elif args.after_date:
+            # 只指定了开始日期，向后搜索18个月
+            from datetime import datetime, timedelta
+            try:
+                after_dt = datetime.strptime(args.after_date, "%Y-%m-%d")
+                before_dt = after_dt + timedelta(days=540)
+                date_range = f"{args.after_date}~{before_dt.strftime('%Y-%m-%d')}"
+            except ValueError:
+                print(f"日期格式错误: {args.after_date}，应为 YYYY-MM-DD", file=sys.stderr)
+                sys.exit(1)
+        
+        # 获取公告列表
         announcements = client.list_announcements(
             args.stock_code,
             keyword="",
             sort="desc",
-            limit=args.limit
+            limit=args.limit,
+            date_range=date_range
         )
         
         # 退市相关关键词
@@ -736,6 +770,7 @@ def main():
         # 输出结果
         result = {
             "stock_code": args.stock_code,
+            "date_range": date_range if date_range else "无限制",
             "total_announcements": len(announcements),
             "filtered_count": len(filtered),
             "announcements": filtered
