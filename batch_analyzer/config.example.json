@@ -1,0 +1,8 @@
+{
+    "llm": {
+        "provider": "openai",
+        "api_key": "cs-sk-118f3a3b-cfbd-44f1-a13e-bc428f933fa5",
+        "base_url": "http://127.0.0.1:23333/v1",
+        "model": "minimax:MiniMax-M2.1"
+    }
+}
