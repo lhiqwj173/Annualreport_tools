@@ -276,6 +276,7 @@ def append_result_to_csv(csv_path: str, data: Dict[str, Any]) -> bool:
 # 退市类型定义
 DELIST_TYPES = {
     "MERGE": "吸收合并退市",
+    "RECODE": "更名换码",  # 证券简称和代码变更，1:1平移
     "VOLUNTARY": "主动退市",
     "TENDER": "要约收购退市",
     "FORCE_FIN": "强制退市_财务",
@@ -286,7 +287,7 @@ DELIST_TYPES = {
 }
 
 # 需要置换字段的类型
-TYPES_REQUIRE_SWAP = {"MERGE"}
+TYPES_REQUIRE_SWAP = {"MERGE", "RECODE"}  # RECODE 也需要置换字段（固定1:1）
 # 可能需要置换字段的类型（股票要约）
 TYPES_MAYBE_SWAP = {"TENDER"}
 # 不需要置换字段的类型
@@ -413,6 +414,13 @@ def validate_result(data: Dict[str, Any]) -> Dict[str, Any]:
                     "type": "INVALID_FORMAT",
                     "field": "置换比例",
                     "message": f"置换比例格式错误: '{ratio}'，应为 '1:X.XXXX' 格式"
+                })
+            # RECODE 类型置换比例必须为 1:1
+            elif delist_type == "RECODE" and ratio != "1:1":
+                errors.append({
+                    "type": "FIELD_CONFLICT",
+                    "field": "置换比例",
+                    "message": f"RECODE（更名换码）类型置换比例必须为 '1:1'，当前为 '{ratio}'"
                 })
         
         # 检查置换标的code格式 (增强版)
@@ -791,7 +799,8 @@ def main():
         delist_keywords = [
             "吸收合并", "换股", "终止上市", "摘牌", "退市",
             "停牌", "预案", "要约收购", "主动退市",
-            "触发退市", "退市整理", "股东大会.*决议"
+            "触发退市", "退市整理", "股东大会.*决议",
+            "证券简称", "证券代码变更"  # RECODE 更名换码
         ]
         
         import re
