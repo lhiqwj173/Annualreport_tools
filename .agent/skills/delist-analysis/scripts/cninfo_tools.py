@@ -28,6 +28,12 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# 强制设置 stdout/stderr 编码为 UTF-8,避免 Windows 控制台乱码
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 
 class CNINFOClient:
     """巨潮资讯API客户端"""
