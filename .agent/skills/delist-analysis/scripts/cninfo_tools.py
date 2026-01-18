@@ -250,7 +250,7 @@ def append_result_to_csv(csv_path: str, data: Dict[str, Any]) -> bool:
     """
     headers = [
         "code", "名称", "退市日期", "退市原因", "退市类型",
-        "首次退市通知日", "停牌开始日", "置换标的code", "置换标的名称", "置换比例",
+        "首次退市通知日", "置换标的code", "置换标的名称", "置换比例",
         "置换完成日期", "来源公告", "公告URL"
     ]
 
@@ -292,12 +292,17 @@ TYPES_NO_SWAP = {"VOLUNTARY", "FORCE_FIN", "FORCE_TRADE", "FORCE_FRAUD", "FORCE_
 
 # 置换相关字段
 SWAP_FIELDS = ["置换标的code", "置换标的名称", "置换比例", "置换完成日期"]
-# 通用必填字段 - 所有退市类型都必须有这些字段
+
+# 通用必填字段 - 策略核心PIT数据
 REQUIRED_FIELDS = [
     "code", "名称", "退市日期", "退市原因", "退市类型", 
-    "首次退市通知日",  # PIT关键：投资者首次获知
-    "停牌开始日",       # PIT关键：最后卖出机会
+    "首次退市通知日",  # PIT关键：策略触发卖出的日期
     "来源公告", "公告URL"
+]
+
+# 可选字段 - 用于数据校验和风险分析，非策略必需
+OPTIONAL_FIELDS = [
+    # 无可选字段
 ]
 
 
@@ -344,7 +349,7 @@ def validate_result(data: Dict[str, Any]) -> Dict[str, Any]:
             })
     
     # 3. 检查日期格式
-    date_fields = ["退市日期", "首次退市通知日", "停牌开始日", "置换完成日期"]
+    date_fields = ["退市日期", "首次退市通知日", "置换完成日期"]
     for field in date_fields:
         value = data.get(field, "")
         if value and value != "NaN":
@@ -357,12 +362,11 @@ def validate_result(data: Dict[str, Any]) -> Dict[str, Any]:
                     "message": f"日期格式错误: '{value}'，应为 YYYY-MM-DD"
                 })
     
-    # 4. 检查日期逻辑
+    # 4. 日期逻辑检查
     first_notice = data.get("首次退市通知日", "")
-    suspend_date = data.get("停牌开始日", "")
     delist_date = data.get("退市日期", "")
     
-    # 4.1 首次通知日 < 退市日期
+    # 4. 首次通知日 < 退市日期
     if first_notice and delist_date and first_notice != "NaN" and delist_date != "NaN":
         try:
             d1 = datetime.strptime(first_notice, "%Y-%m-%d")
@@ -373,39 +377,6 @@ def validate_result(data: Dict[str, Any]) -> Dict[str, Any]:
                     "field": "首次退市通知日",
                     "message": f"首次退市通知日({first_notice})应早于退市日期({delist_date})"
                 })
-        except ValueError:
-            pass
-    
-    # 4.2 首次通知日 <= 停牌开始日 <= 退市日期
-    if suspend_date and suspend_date != "NaN":
-        try:
-            d_suspend = datetime.strptime(suspend_date, "%Y-%m-%d")
-            if first_notice and first_notice != "NaN":
-                d_notice = datetime.strptime(first_notice, "%Y-%m-%d")
-                if d_suspend < d_notice:
-                    errors.append({
-                        "type": "LOGIC_ERROR",
-                        "field": "停牌开始日",
-                        "message": f"停牌开始日({suspend_date})应晚于或等于首次退市通知日({first_notice})"
-                    })
-                    
-                # 4.3 合理性检验：首次通知日与停牌日间隔应足够长
-                days_gap = (d_suspend - d_notice).days
-                if days_gap < 7:  # 间隔小于7天为警告
-                    warnings.append({
-                        "type": "SHORT_INTERVAL",
-                        "message": f"首次退市通知日({first_notice})与停牌开始日({suspend_date})仅相隔{days_gap}天，"
-                                   f"投资者反应时间很短。请确认首次通知日是否正确，可能需要搜索更早的公告（如'筹划重组'、'筹划重大事项'等）"
-                    })
-                    
-            if delist_date and delist_date != "NaN":
-                d_delist = datetime.strptime(delist_date, "%Y-%m-%d")
-                if d_suspend > d_delist:
-                    errors.append({
-                        "type": "LOGIC_ERROR",
-                        "field": "停牌开始日",
-                        "message": f"停牌开始日({suspend_date})应早于或等于退市日期({delist_date})"
-                    })
         except ValueError:
             pass
     
