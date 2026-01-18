@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "Agent完成提醒",
+  "description": "当agent完成工作或需要用户输入时，发出蜂鸣声提醒用户",
+  "version": "1",
+  "when": {
+    "type": "agentStop"
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "powershell -c \"[console]::beep(1000,500)\""
+  }
+}
