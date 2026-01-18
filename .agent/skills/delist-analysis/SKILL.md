@@ -102,6 +102,18 @@ Agent: 好的，我发现 600705 也是类似案例，一并分析了 3 只股�
 
 ---
 
+## 📁 临时文件目录
+
+所有临时文件必须放在 `temp/` 目录中：
+
+| 文件类型 | 路径示例 |
+|---------|----------|
+| 下载的 PDF | `temp/<stock_code>.pdf` |
+| 校验用 JSON | `temp/<stock_code>_data.json` |
+
+> [!NOTE]
+> 分析完成后，使用清理命令删除 `temp/` 目录下的临时文件。
+
 ## 🔢 股票代码格式规范
 
 > [!WARNING]
@@ -444,7 +456,7 @@ df = pd.read_csv("file.csv", dtype={"code": str})
 使用 `filter-delist` 命令快速筛选出与退市相关的公告：
 
 ```bash
-$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py filter-delist <stock_code> --limit 300
+$env:PYTHONIOENCODING='utf-8'; python .agent/skills/delist-analysis/scripts/cninfo_tools.py filter-delist <stock_code> --limit 300
 ```
 
 这会自动筛选包含以下关键词的公告：吸收合并、换股、终止上市、摘牌、退市、停牌、预案、要约收购、主动退市等。
@@ -452,7 +464,7 @@ $env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/d
 如果需要查看完整公告列表：
 
 ```bash
-$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py list-announcements <stock_code> --limit 100 --sort desc
+$env:PYTHONIOENCODING='utf-8'; python .agent/skills/delist-analysis/scripts/cninfo_tools.py list-announcements <stock_code> --limit 100 --sort desc
 ```
 
 ### 步骤 2: 识别退市类型
@@ -506,10 +518,10 @@ else:
 
 ```bash
 # 下载 PDF
-$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py download-pdf "<url>" --output temp.pdf
+$env:PYTHONIOENCODING='utf-8'; python .agent/skills/delist-analysis/scripts/cninfo_tools.py download-pdf "<url>" --output temp/<stock_code>.pdf
 
 # 提取文本
-$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py extract-text temp.pdf --max-pages 5
+$env:PYTHONIOENCODING='utf-8'; python .agent/skills/delist-analysis/scripts/cninfo_tools.py extract-text temp/<stock_code>.pdf --max-pages 5
 ```
 
 ### 步骤 5: 执行校验
@@ -517,11 +529,11 @@ $env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/d
 提取完成后，**必须执行完整校验**。先将数据保存为 JSON 文件，然后校验：
 
 ```bash
-# 保存数据到临时文件
+# 保存数据到临时文件 temp/<stock_code>_data.json
 # 内容: {"code":"xxxxxx", "名称":"xxx", ...}
 
 # 校验数据
-$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py validate --file temp_data.json
+$env:PYTHONIOENCODING='utf-8'; python .agent/skills/delist-analysis/scripts/cninfo_tools.py validate --file temp/<stock_code>_data.json
 ```
 
 如果校验通过，继续保存。如果校验失败，**必须停止并报告用户**。
@@ -531,7 +543,7 @@ $env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/d
 只有校验通过后才能保存：
 
 ```bash
-$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py append-result --csv <output_file> --file temp_data.json
+$env:PYTHONIOENCODING='utf-8'; python .agent/skills/delist-analysis/scripts/cninfo_tools.py append-result --csv <output_file> --file temp/<stock_code>_data.json
 ```
 
 ---
@@ -641,9 +653,9 @@ $env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/d
 
 ## 清理
 
-分析完成后删除临时PDF文件：
+分析完成后删除临时文件：
 ```bash
-Remove-Item temp*.pdf -ErrorAction SilentlyContinue
+Remove-Item temp/*.pdf, temp/*.json -ErrorAction SilentlyContinue
 ```
 
 ---
@@ -676,7 +688,7 @@ Remove-Item temp*.pdf -ErrorAction SilentlyContinue
 对于每只持仓股票，获取最近30天的公告：
 
 ```bash
-$env:PYTHONIOENCODING='utf-8'; D:/programs/miniconda3/python.exe .agent/skills/delist-analysis/scripts/cninfo_tools.py list-announcements <stock_code> --limit 30 --sort desc
+$env:PYTHONIOENCODING='utf-8'; python .agent/skills/delist-analysis/scripts/cninfo_tools.py list-announcements <stock_code> --limit 30 --sort desc
 ```
 
 ### 步骤 3: 检测风险信号
