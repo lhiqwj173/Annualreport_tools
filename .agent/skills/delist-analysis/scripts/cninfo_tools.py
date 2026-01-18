@@ -609,10 +609,47 @@ def main():
         print(json.dumps(results, ensure_ascii=False, indent=2))
 
     elif args.command == "download-pdf":
+        # 自动验证 URL 来源
+        # 从 URL 路径中提取可能的日期信息，然后查找 temp 目录下的公告列表
+        temp_dir = Path("temp")
+        verified = False
+        
+        if temp_dir.exists():
+            # 遍历 temp 目录下的所有公告列表文件
+            for json_file in temp_dir.glob("*_announcements.json"):
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        source_data = json.load(f)
+                    # 提取所有 URL
+                    if isinstance(source_data, dict) and 'announcements' in source_data:
+                        valid_urls = [ann.get('url', '') for ann in source_data['announcements']]
+                    elif isinstance(source_data, list):
+                        valid_urls = [ann.get('url', '') for ann in source_data]
+                    else:
+                        continue
+                    
+                    if args.url in valid_urls:
+                        verified = True
+                        print(f"✅ URL验证通过 (来源: {json_file.name})", file=sys.stderr)
+                        break
+                except (json.JSONDecodeError, IOError, UnicodeDecodeError):
+                    continue
+        
+        if not verified:
+            print(f"❌ 错误: URL不在查询的公告列表中", file=sys.stderr)
+            print(f"提供的URL: {args.url}", file=sys.stderr)
+            print(f"", file=sys.stderr)
+            print(f"可能原因:", file=sys.stderr)
+            print(f"  1. 使用了错误的公告ID", file=sys.stderr)
+            print(f"  2. 未使用 filter-delist 命令获取公告URL", file=sys.stderr)
+            print(f"", file=sys.stderr)
+            print(f"解决方法: 请先执行 filter-delist 命令获取准确的公告URL", file=sys.stderr)
+            sys.exit(1)
+        
         client = CNINFOClient()
         success = client.download_pdf(args.url, args.output)
         if success:
-            print(json.dumps({"success": True, "path": args.output}))
+            print(json.dumps({"success": True, "path": args.output, "verified": verified}))
         else:
             print(json.dumps({"success": False, "error": "Download failed"}))
             sys.exit(1)
@@ -775,6 +812,18 @@ def main():
             "filtered_count": len(filtered),
             "announcements": filtered
         }
+        
+        # 自动保存公告列表到 temp 目录（用于 download-pdf 验证）
+        temp_dir = Path("temp")
+        temp_dir.mkdir(exist_ok=True)
+        cache_file = temp_dir / f"{args.stock_code}_announcements.json"
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+            print(f"📁 公告列表已保存: {cache_file}", file=sys.stderr)
+        except IOError as e:
+            print(f"⚠️  保存公告列表失败: {e}", file=sys.stderr)
+        
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
     else:
